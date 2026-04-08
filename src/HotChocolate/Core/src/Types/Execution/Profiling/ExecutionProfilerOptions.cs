@@ -93,6 +93,11 @@ public sealed class ExecutionProfilerOptions
     public bool OpenTelemetryIncludeOperationName { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether profiler traces should be emitted via OpenTelemetry activities.
+    /// </summary>
+    public bool OpenTelemetryTracingEnabled { get; set; } = true;
+
+    /// <summary>
     /// Gets or sets a value indicating whether slow request logging is enabled.
     /// </summary>
     public bool SlowRequestLoggingEnabled { get; set; } = true;

@@ -1,5 +1,6 @@
 using GreenDonut;
 using GreenDonut.DependencyInjection;
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using HotChocolate.Execution.Instrumentation;
 using HotChocolate.Execution.Configuration;
@@ -107,6 +108,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromMinutes(5), options.SlidingWindowDuration);
         Assert.True(options.OpenTelemetryEnabled);
         Assert.False(options.OpenTelemetryIncludeOperationName);
+        Assert.True(options.OpenTelemetryTracingEnabled);
         Assert.True(options.SlowRequestLoggingEnabled);
         Assert.Equal(TimeSpan.FromMilliseconds(500), options.SlowRequestThreshold);
         Assert.Equal(5, options.SlowRequestFieldLimit);
@@ -132,6 +134,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:02:00";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryIncludeOperationName"] = "true";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryTracingEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestLoggingEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestThreshold"] = "00:00:02";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestFieldLimit"] = "9";
@@ -157,6 +160,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromMinutes(2), options.SlidingWindowDuration);
         Assert.False(options.OpenTelemetryEnabled);
         Assert.True(options.OpenTelemetryIncludeOperationName);
+        Assert.False(options.OpenTelemetryTracingEnabled);
         Assert.False(options.SlowRequestLoggingEnabled);
         Assert.Equal(TimeSpan.FromSeconds(2), options.SlowRequestThreshold);
         Assert.Equal(9, options.SlowRequestFieldLimit);
@@ -187,6 +191,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                         options.SlidingWindowDuration = TimeSpan.FromSeconds(45);
                         options.OpenTelemetryEnabled = false;
                         options.OpenTelemetryIncludeOperationName = true;
+                        options.OpenTelemetryTracingEnabled = false;
                         options.SlowRequestLoggingEnabled = false;
                         options.SlowRequestThreshold = TimeSpan.FromSeconds(3);
                         options.SlowRequestFieldLimit = 7;
@@ -210,6 +215,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromSeconds(45), options.SlidingWindowDuration);
         Assert.False(options.OpenTelemetryEnabled);
         Assert.True(options.OpenTelemetryIncludeOperationName);
+        Assert.False(options.OpenTelemetryTracingEnabled);
         Assert.False(options.SlowRequestLoggingEnabled);
         Assert.Equal(TimeSpan.FromSeconds(3), options.SlowRequestThreshold);
         Assert.Equal(7, options.SlowRequestFieldLimit);
@@ -655,6 +661,74 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_EmitOpenTelemetryActivity_When_ProfilerTracingEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.OpenTelemetryEnabled = false;
+                    options.OpenTelemetryTracingEnabled = true;
+                    options.OpenTelemetryIncludeOperationName = true;
+                }));
+
+        var emittedActivities = new List<Activity>();
+
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = static source =>
+                source.Name.Equals(ExecutionProfilerTelemetry.ActivitySourceName, StringComparison.Ordinal),
+            Sample = static (ref ActivityCreationOptions<ActivityContext> _) =>
+                ActivitySamplingResult.AllDataAndRecorded,
+            SampleUsingParentId = static (ref ActivityCreationOptions<string> _) =>
+                ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity => emittedActivities.Add(activity)
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        await executor.ExecuteAsync("query TraceableRequest { greeting }");
+
+        var activity = Assert.Single(emittedActivities);
+        Assert.Equal("graphql.execution.profile", activity.OperationName);
+        Assert.Equal("query", activity.GetTagItem("graphql.operation.type"));
+        Assert.Equal("TraceableRequest", activity.GetTagItem("graphql.operation.name"));
+        Assert.NotNull(activity.GetTagItem("graphql.profiler.request.duration.ns"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_NotEmitOpenTelemetryActivity_When_ProfilerTracingDisabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.OpenTelemetryEnabled = false;
+                    options.OpenTelemetryTracingEnabled = false;
+                    options.OpenTelemetryIncludeOperationName = true;
+                }));
+
+        var emittedActivities = new List<Activity>();
+
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = static source =>
+                source.Name.Equals(ExecutionProfilerTelemetry.ActivitySourceName, StringComparison.Ordinal),
+            Sample = static (ref ActivityCreationOptions<ActivityContext> _) =>
+                ActivitySamplingResult.AllDataAndRecorded,
+            SampleUsingParentId = static (ref ActivityCreationOptions<string> _) =>
+                ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity => emittedActivities.Add(activity)
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        await executor.ExecuteAsync("query TraceableRequest { greeting }");
+
+        Assert.Empty(emittedActivities);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_Should_LogWarning_When_RequestIsSlowerThanConfiguredThreshold()
     {
         var logCollector = new TestLogCollectorProvider();
@@ -968,6 +1042,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:00:30";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryIncludeOperationName"] = "true";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryTracingEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestLoggingEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestThreshold"] = "00:00:01";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestFieldLimit"] = "4";
@@ -993,6 +1068,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromSeconds(30), options.SlidingWindowDuration);
         Assert.False(options.OpenTelemetryEnabled);
         Assert.True(options.OpenTelemetryIncludeOperationName);
+        Assert.False(options.OpenTelemetryTracingEnabled);
         Assert.False(options.SlowRequestLoggingEnabled);
         Assert.Equal(TimeSpan.FromSeconds(1), options.SlowRequestThreshold);
         Assert.Equal(4, options.SlowRequestFieldLimit);

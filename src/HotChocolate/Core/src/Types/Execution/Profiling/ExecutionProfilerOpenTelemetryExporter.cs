@@ -5,6 +5,10 @@ namespace HotChocolate.Execution.Profiling;
 
 internal sealed class ExecutionProfilerOpenTelemetryExporter : IExecutionProfilerMetricsExporter
 {
+    private static readonly ActivitySource s_activitySource = new(
+        ExecutionProfilerTelemetry.ActivitySourceName,
+        typeof(ExecutionProfilerOpenTelemetryExporter).Assembly.GetName().Version?.ToString());
+
     private static readonly Meter s_meter = new(
         ExecutionProfilerTelemetry.MeterName,
         typeof(ExecutionProfilerOpenTelemetryExporter).Assembly.GetName().Version?.ToString());
@@ -65,6 +69,13 @@ internal sealed class ExecutionProfilerOpenTelemetryExporter : IExecutionProfile
         ArgumentNullException.ThrowIfNull(requestSample);
         ArgumentNullException.ThrowIfNull(profilingExtension);
 
+        var nPlusOneIssueCount = TryGetNPlusOneIssueCount(profilingExtension);
+
+        if (_options.OpenTelemetryTracingEnabled)
+        {
+            PublishTrace(requestSample, nPlusOneIssueCount);
+        }
+
         if (!_options.OpenTelemetryEnabled)
         {
             return;
@@ -91,11 +102,38 @@ internal sealed class ExecutionProfilerOpenTelemetryExporter : IExecutionProfile
             s_fieldDurationHistogram.Record(ToMilliseconds(field.DurationNanoseconds), fieldTags);
         }
 
-        var nPlusOneIssueCount = TryGetNPlusOneIssueCount(profilingExtension);
         if (nPlusOneIssueCount > 0)
         {
             s_nPlusOneIssueCounter.Add(nPlusOneIssueCount, tags);
         }
+    }
+
+    private void PublishTrace(
+        ExecutionProfilerRequestSample requestSample,
+        long nPlusOneIssueCount)
+    {
+        using var activity = s_activitySource.StartActivity(
+            "graphql.execution.profile",
+            ActivityKind.Internal);
+
+        if (activity is null)
+        {
+            return;
+        }
+
+        activity.SetTag("graphql.operation.type", requestSample.OperationType);
+        if (_options.OpenTelemetryIncludeOperationName
+            && !string.IsNullOrWhiteSpace(requestSample.OperationName))
+        {
+            activity.SetTag("graphql.operation.name", requestSample.OperationName);
+        }
+
+        activity.SetTag("graphql.profiler.request.duration.ns", requestSample.RequestDurationNanoseconds);
+        activity.SetTag("graphql.profiler.field.count", requestSample.Fields.Count);
+        activity.SetTag("graphql.profiler.dataloader.batch.calls", requestSample.DataLoaderBatchCalls);
+        activity.SetTag("graphql.profiler.dataloader.cache.hits", requestSample.DataLoaderCacheHits);
+        activity.SetTag("graphql.profiler.dataloader.cache.misses", requestSample.DataLoaderCacheMisses);
+        activity.SetTag("graphql.profiler.nplusone.issue.count", nPlusOneIssueCount);
     }
 
     private TagList CreateOperationTags(

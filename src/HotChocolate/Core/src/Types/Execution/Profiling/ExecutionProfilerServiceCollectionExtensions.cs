@@ -154,6 +154,11 @@ public static class ExecutionProfilerServiceCollectionExtensions
                     options.OpenTelemetryIncludeOperationName = includeOperationName;
                 }
 
+                if (bool.TryParse(section["OpenTelemetryTracingEnabled"], out var openTelemetryTracingEnabled))
+                {
+                    options.OpenTelemetryTracingEnabled = openTelemetryTracingEnabled;
+                }
+
                 if (bool.TryParse(section["SlowRequestLoggingEnabled"], out var slowRequestLoggingEnabled))
                 {
                     options.SlowRequestLoggingEnabled = slowRequestLoggingEnabled;
