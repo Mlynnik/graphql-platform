@@ -211,6 +211,20 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_RecordFieldDepth_When_ResolverPathIsPureNested()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(options => options.Enabled = true));
+
+        var result = (await executor.ExecuteAsync("{ pureChild { pureNested { pureName } } }"))
+            .ExpectOperationResult();
+
+        Assert.Equal(1, GetFieldDepth(GetFieldProfile(result, "pureChild")));
+        Assert.Equal(2, GetFieldDepth(GetFieldProfile(result, "pureChild.pureNested")));
+        Assert.Equal(3, GetFieldDepth(GetFieldProfile(result, "pureChild.pureNested.pureName")));
+    }
+
+    [Fact]
     public async Task IsExecutionProfilerEnabled_Should_RespectRuntimeAndRequestOverrides_When_ExecutingRequests()
     {
         var listener = new CaptureProfilerStateListener();
@@ -291,6 +305,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         }
 
         public ProfilerChild Child(IResolverContext context) => new();
+
+        public PureProfilerChild PureChild() => new();
     }
 
     public sealed class ProfilerChild
@@ -301,6 +317,16 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     public sealed class ProfilerNested
     {
         public string Name(IResolverContext context) => "Nested";
+    }
+
+    public sealed class PureProfilerChild
+    {
+        public PureProfilerNested PureNested() => new();
+    }
+
+    public sealed class PureProfilerNested
+    {
+        public string PureName() => "PureNested";
     }
 
     private sealed class CaptureProfilerStateListener : ExecutionDiagnosticEventListener

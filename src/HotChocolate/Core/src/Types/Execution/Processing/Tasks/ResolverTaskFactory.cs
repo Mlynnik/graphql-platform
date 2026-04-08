@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Buffers;
 using System.Diagnostics;
+using HotChocolate.Execution.Profiling;
 using HotChocolate.Text.Json;
 using HotChocolate.Types;
 using static HotChocolate.Execution.Processing.ValueCompletion;
@@ -296,6 +297,9 @@ internal static class ResolverTaskFactory
     {
         var operationContext = context.OperationContext;
         var resolverContext = context.ResolverContext;
+        var hasProfileCollector =
+            resolverContext.Features.TryGet<ExecutionProfileCollector>(out var profileCollector);
+        var startTimestamp = hasProfileCollector ? Stopwatch.GetTimestamp() : 0;
         var executedSuccessfully = false;
         object? resolverResult = null;
 
@@ -359,6 +363,13 @@ internal static class ResolverTaskFactory
             }
 
             operationContext.Result.AddNonNullViolation(fieldValue.Path);
+        }
+
+        if (hasProfileCollector)
+        {
+            profileCollector!.AddField(
+                fieldValue.Path,
+                Stopwatch.GetElapsedTime(startTimestamp).Ticks * 100);
         }
     }
 
