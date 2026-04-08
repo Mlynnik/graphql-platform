@@ -49,4 +49,19 @@ public sealed class ExecutionProfilerOptions
     /// Gets or sets a value indicating whether operation names should be included in OpenTelemetry metric tags.
     /// </summary>
     public bool OpenTelemetryIncludeOperationName { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether slow request logging is enabled.
+    /// </summary>
+    public bool SlowRequestLoggingEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets the slow request threshold for warning logs.
+    /// </summary>
+    public TimeSpan SlowRequestThreshold { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// Gets or sets the maximum number of slowest fields included in a slow request log entry.
+    /// </summary>
+    public int SlowRequestFieldLimit { get; set; } = 5;
 }

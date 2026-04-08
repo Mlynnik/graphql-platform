@@ -1,5 +1,6 @@
 using HotChocolate.Execution.Profiling;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace HotChocolate.Execution.Pipeline;
 
@@ -18,6 +19,7 @@ internal sealed class ExecutionProfilerMiddleware
         var options = context.GetExecutionProfilerOptions();
         var aggregationStore = context.Schema.Services.GetRequiredService<IExecutionProfilerAggregationStore>();
         var metricsExporter = context.Schema.Services.GetRequiredService<IExecutionProfilerMetricsExporter>();
+        var logger = context.RequestServices.GetService<ILogger<ExecutionProfilerMiddleware>>();
 
         // Ensure profiler state can still be resolved even when middleware is bypassed.
         if (!isEnabled)
@@ -55,6 +57,7 @@ internal sealed class ExecutionProfilerMiddleware
 
                 var profilingExtension = profileCollector.CreateResultExtension(options, aggregates);
                 metricsExporter.Publish(requestSample, profilingExtension);
+                LogSlowRequestIfNeeded(logger, options, requestSample);
 
                 operationResult.Extensions =
                     operationResult.Extensions.SetItem(
@@ -110,4 +113,58 @@ internal sealed class ExecutionProfilerMiddleware
 
         return null;
     }
+
+    private static void LogSlowRequestIfNeeded(
+        ILogger<ExecutionProfilerMiddleware>? logger,
+        ExecutionProfilerOptions options,
+        ExecutionProfilerRequestSample requestSample)
+    {
+        if (logger is null
+            || !options.SlowRequestLoggingEnabled
+            || !logger.IsEnabled(LogLevel.Warning))
+        {
+            return;
+        }
+
+        var thresholdNanoseconds = options.SlowRequestThreshold.Ticks * 100L;
+        if (thresholdNanoseconds <= 0)
+        {
+            thresholdNanoseconds = 1;
+        }
+
+        if (requestSample.RequestDurationNanoseconds < thresholdNanoseconds)
+        {
+            return;
+        }
+
+        var fieldLimit = options.SlowRequestFieldLimit;
+        if (fieldLimit <= 0)
+        {
+            fieldLimit = 1;
+        }
+
+        var fields = requestSample.Fields
+            .OrderByDescending(static field => field.DurationNanoseconds)
+            .Take(fieldLimit)
+            .Select(static field =>
+                $"{field.Coordinate}:{ToMilliseconds(field.DurationNanoseconds):0.###}ms");
+        var slowestFields = string.Join(", ", fields);
+
+        logger.LogWarning(
+            "GraphQL slow request detected. operationType={OperationType} operationName={OperationName} "
+            + "durationMs={DurationMs} fieldCount={FieldCount} dataLoaderBatchCalls={DataLoaderBatchCalls} "
+            + "dataLoaderCacheHits={DataLoaderCacheHits} dataLoaderCacheMisses={DataLoaderCacheMisses} "
+            + "slowestFields={SlowestFields}",
+            requestSample.OperationType,
+            requestSample.OperationName ?? "<anonymous>",
+            ToMilliseconds(requestSample.RequestDurationNanoseconds),
+            requestSample.Fields.Count,
+            requestSample.DataLoaderBatchCalls,
+            requestSample.DataLoaderCacheHits,
+            requestSample.DataLoaderCacheMisses,
+            slowestFields);
+    }
+
+    private static double ToMilliseconds(long durationNanoseconds)
+        => durationNanoseconds / 1_000_000d;
 }

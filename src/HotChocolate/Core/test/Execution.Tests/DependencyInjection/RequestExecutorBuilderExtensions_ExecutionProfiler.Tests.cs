@@ -7,6 +7,7 @@ using HotChocolate.Execution.Profiling;
 using HotChocolate.Resolvers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace HotChocolate.Execution.DependencyInjection;
 
@@ -99,6 +100,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromMinutes(5), options.SlidingWindowDuration);
         Assert.True(options.OpenTelemetryEnabled);
         Assert.False(options.OpenTelemetryIncludeOperationName);
+        Assert.True(options.SlowRequestLoggingEnabled);
+        Assert.Equal(TimeSpan.FromMilliseconds(500), options.SlowRequestThreshold);
+        Assert.Equal(5, options.SlowRequestFieldLimit);
         Assert.False(state.IsEnabled);
     }
 
@@ -114,6 +118,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:02:00";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryIncludeOperationName"] = "true";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestLoggingEnabled"] = "false";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestThreshold"] = "00:00:02";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestFieldLimit"] = "9";
 
         var executor = await CreateExecutorAsync(
             configure: builder => builder.AddExecutionProfiler(configuration));
@@ -129,6 +136,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromMinutes(2), options.SlidingWindowDuration);
         Assert.False(options.OpenTelemetryEnabled);
         Assert.True(options.OpenTelemetryIncludeOperationName);
+        Assert.False(options.SlowRequestLoggingEnabled);
+        Assert.Equal(TimeSpan.FromSeconds(2), options.SlowRequestThreshold);
+        Assert.Equal(9, options.SlowRequestFieldLimit);
         Assert.True(state.IsEnabled);
     }
 
@@ -149,6 +159,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                         options.SlidingWindowDuration = TimeSpan.FromSeconds(45);
                         options.OpenTelemetryEnabled = false;
                         options.OpenTelemetryIncludeOperationName = true;
+                        options.SlowRequestLoggingEnabled = false;
+                        options.SlowRequestThreshold = TimeSpan.FromSeconds(3);
+                        options.SlowRequestFieldLimit = 7;
                     }));
 
         var options = executor.GetExecutionProfilerOptions();
@@ -162,6 +175,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromSeconds(45), options.SlidingWindowDuration);
         Assert.False(options.OpenTelemetryEnabled);
         Assert.True(options.OpenTelemetryIncludeOperationName);
+        Assert.False(options.SlowRequestLoggingEnabled);
+        Assert.Equal(TimeSpan.FromSeconds(3), options.SlowRequestThreshold);
+        Assert.Equal(7, options.SlowRequestFieldLimit);
         Assert.True(state.IsEnabled);
     }
 
@@ -188,6 +204,35 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var result = (await executor.ExecuteAsync("{ greeting }")).ExpectOperationResult();
 
         Assert.False(result.Extensions.ContainsKey("profiling"));
+    }
+
+    [Fact]
+    public async Task GetExecutionProfilerStatistics_Should_ReturnAggregationSnapshot_When_ProfilerIsEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.AggregationEnabled = true;
+                }));
+
+        await executor.ExecuteAsync("{ greeting }");
+
+        var statistics = executor.GetExecutionProfilerStatistics();
+        var window = GetDictionaryValue(statistics, "window");
+
+        Assert.True(GetIntValue(window, "requestCount") >= 1);
+    }
+
+    [Fact]
+    public async Task GetExecutionProfilerStatistics_Should_ReturnEmpty_When_ProfilerIsNotRegistered()
+    {
+        var executor = await CreateExecutorAsync();
+
+        var statistics = executor.GetExecutionProfilerStatistics();
+
+        Assert.Empty(statistics);
     }
 
     [Fact]
@@ -425,6 +470,67 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_LogWarning_When_RequestIsSlowerThanConfiguredThreshold()
+    {
+        var logCollector = new TestLogCollectorProvider();
+
+        var executor = await CreateExecutorAsyncWithServices(
+            services =>
+            {
+                services.AddLogging(logging =>
+                {
+                    logging.ClearProviders();
+                    logging.AddProvider(logCollector);
+                });
+            },
+            builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.SlowRequestLoggingEnabled = true;
+                    options.SlowRequestThreshold = TimeSpan.FromTicks(1);
+                    options.SlowRequestFieldLimit = 2;
+                }));
+
+        await executor.ExecuteAsync("{ asyncGreeting }");
+
+        Assert.Contains(
+            logCollector.Entries,
+            static entry => entry.LogLevel == LogLevel.Warning
+                && entry.Message.Contains("GraphQL slow request detected.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_NotLogWarning_When_SlowRequestLoggingIsDisabled()
+    {
+        var logCollector = new TestLogCollectorProvider();
+
+        var executor = await CreateExecutorAsyncWithServices(
+            services =>
+            {
+                services.AddLogging(logging =>
+                {
+                    logging.ClearProviders();
+                    logging.AddProvider(logCollector);
+                });
+            },
+            builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.SlowRequestLoggingEnabled = false;
+                    options.SlowRequestThreshold = TimeSpan.FromMilliseconds(1);
+                }));
+
+        await executor.ExecuteAsync("{ asyncGreeting }");
+
+        Assert.DoesNotContain(
+            logCollector.Entries,
+            static entry => entry.LogLevel == LogLevel.Warning
+                && entry.Message.Contains("GraphQL slow request detected.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_Should_AddAggregateStatisticsGroupedByOperationType_When_AggregationEnabled()
     {
         var executor = await CreateExecutorAsync(
@@ -635,6 +741,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:00:30";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryIncludeOperationName"] = "true";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestLoggingEnabled"] = "false";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestThreshold"] = "00:00:01";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowRequestFieldLimit"] = "4";
 
         var services = new ServiceCollection();
         services.ConfigureExecutionProfiler(configuration);
@@ -650,6 +759,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.Equal(TimeSpan.FromSeconds(30), options.SlidingWindowDuration);
         Assert.False(options.OpenTelemetryEnabled);
         Assert.True(options.OpenTelemetryIncludeOperationName);
+        Assert.False(options.SlowRequestLoggingEnabled);
+        Assert.Equal(TimeSpan.FromSeconds(1), options.SlowRequestThreshold);
+        Assert.Equal(4, options.SlowRequestFieldLimit);
         Assert.True(state.IsEnabled);
     }
 
@@ -662,6 +774,23 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
             .AddMutationType<ProfilerMutation>();
 
         configure?.Invoke(builder);
+
+        return builder.BuildRequestExecutorAsync();
+    }
+
+    private static ValueTask<IRequestExecutor> CreateExecutorAsyncWithServices(
+        Action<IServiceCollection>? configureServices = null,
+        Action<IRequestExecutorBuilder>? configureBuilder = null)
+    {
+        var services = new ServiceCollection();
+        configureServices?.Invoke(services);
+
+        var builder = services
+            .AddGraphQLServer()
+            .AddQueryType<ProfilerQuery>()
+            .AddMutationType<ProfilerMutation>();
+
+        configureBuilder?.Invoke(builder);
 
         return builder.BuildRequestExecutorAsync();
     }
@@ -757,6 +886,51 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         {
             CapturedStates.Add(context.IsExecutionProfilerEnabled());
             return EmptyScope;
+        }
+    }
+
+    private sealed class TestLogCollectorProvider : ILoggerProvider
+    {
+        private readonly List<LogEntry> _entries = [];
+
+        public IReadOnlyList<LogEntry> Entries => _entries;
+
+        public ILogger CreateLogger(string categoryName)
+            => new CollectorLogger(_entries);
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class CollectorLogger(List<LogEntry> entries) : ILogger
+    {
+        public IDisposable BeginScope<TState>(TState state)
+            where TState : notnull
+            => EmptyScope.Instance;
+
+        public bool IsEnabled(LogLevel logLevel)
+            => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            entries.Add(new LogEntry(logLevel, formatter(state, exception)));
+        }
+    }
+
+    private sealed record LogEntry(LogLevel LogLevel, string Message);
+
+    private sealed class EmptyScope : IDisposable
+    {
+        public static EmptyScope Instance { get; } = new();
+
+        public void Dispose()
+        {
         }
     }
 

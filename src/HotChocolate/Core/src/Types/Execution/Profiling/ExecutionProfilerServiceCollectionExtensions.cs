@@ -135,6 +135,29 @@ public static class ExecutionProfilerServiceCollectionExtensions
                     options.OpenTelemetryIncludeOperationName = includeOperationName;
                 }
 
+                if (bool.TryParse(section["SlowRequestLoggingEnabled"], out var slowRequestLoggingEnabled))
+                {
+                    options.SlowRequestLoggingEnabled = slowRequestLoggingEnabled;
+                }
+
+                var slowRequestThreshold = section["SlowRequestThreshold"];
+                if (TimeSpan.TryParse(slowRequestThreshold, out var parsedSlowRequestThreshold)
+                    && parsedSlowRequestThreshold > TimeSpan.Zero)
+                {
+                    options.SlowRequestThreshold = parsedSlowRequestThreshold;
+                }
+                else if (int.TryParse(slowRequestThreshold, out var slowRequestThresholdMs)
+                    && slowRequestThresholdMs > 0)
+                {
+                    options.SlowRequestThreshold = TimeSpan.FromMilliseconds(slowRequestThresholdMs);
+                }
+
+                if (int.TryParse(section["SlowRequestFieldLimit"], out var slowRequestFieldLimit)
+                    && slowRequestFieldLimit > 0)
+                {
+                    options.SlowRequestFieldLimit = slowRequestFieldLimit;
+                }
+
                 if (int.TryParse(section["SlidingWindowMaxRequests"], out var maxRequests)
                     && maxRequests > 0)
                 {

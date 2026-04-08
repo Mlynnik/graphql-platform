@@ -8,6 +8,9 @@ namespace HotChocolate.Execution;
 /// </summary>
 public static class ExecutionProfilerRequestContextExtensions
 {
+    private static readonly IReadOnlyDictionary<string, object?> s_emptyProfilerStatistics =
+        new Dictionary<string, object?>(0);
+
     /// <summary>
     /// Gets execution profiler options from the current request context.
     /// </summary>
@@ -70,6 +73,29 @@ public static class ExecutionProfilerRequestContextExtensions
         ArgumentNullException.ThrowIfNull(executor);
 
         return executor.Schema.Services.GetRequiredService<IExecutionProfilerState>();
+    }
+
+    /// <summary>
+    /// Gets the current profiler aggregation statistics for this executor.
+    /// </summary>
+    /// <param name="executor">
+    /// The request executor.
+    /// </param>
+    /// <returns>
+    /// Returns profiler aggregation statistics.
+    /// </returns>
+    public static IReadOnlyDictionary<string, object?> GetExecutionProfilerStatistics(
+        this IRequestExecutor executor)
+    {
+        ArgumentNullException.ThrowIfNull(executor);
+
+        var aggregationStore = executor.Schema.Services.GetService<IExecutionProfilerAggregationStore>();
+        if (aggregationStore is null)
+        {
+            return s_emptyProfilerStatistics;
+        }
+
+        return aggregationStore.CreateSnapshot();
     }
 
     /// <summary>
