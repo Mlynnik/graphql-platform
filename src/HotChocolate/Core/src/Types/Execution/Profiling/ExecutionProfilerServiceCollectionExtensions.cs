@@ -114,6 +114,13 @@ public static class ExecutionProfilerServiceCollectionExtensions
                     options.DetailLevel = parsedDetailLevel;
                 }
 
+                AddStringSetValues(section, "IncludedOperationTypes", options.IncludedOperationTypes);
+                AddStringSetValues(section, "IncludedOperationNames", options.IncludedOperationNames);
+                AddStringSetValues(section, "IncludedPathPrefixes", options.IncludedPathPrefixes);
+                AddStringSetValues(section, "ExcludedObjectTypes", options.ExcludedObjectTypes);
+                AddStringSetValues(section, "ExcludedFieldCoordinates", options.ExcludedFieldCoordinates);
+                AddStringSetValues(section, "ExcludedFieldNames", options.ExcludedFieldNames);
+
                 if (int.TryParse(section["NPlusOneListPatternThreshold"], out var threshold)
                     && threshold > 0)
                 {
@@ -188,5 +195,37 @@ public static class ExecutionProfilerServiceCollectionExtensions
         }
 
         return configuration.GetSection(sectionPath);
+    }
+
+    private static void AddStringSetValues(
+        IConfiguration section,
+        string key,
+        ISet<string> target)
+    {
+        AddDelimitedValues(section[key], target);
+
+        foreach (var child in section.GetSection(key).GetChildren())
+        {
+            AddDelimitedValues(child.Value, target);
+        }
+    }
+
+    private static void AddDelimitedValues(
+        string? values,
+        ISet<string> target)
+    {
+        if (string.IsNullOrWhiteSpace(values))
+        {
+            return;
+        }
+
+        var splitValues = values.Split(',', ';', StringSplitOptions.TrimEntries);
+        for (var i = 0; i < splitValues.Length; i++)
+        {
+            if (splitValues[i].Length > 0)
+            {
+                target.Add(splitValues[i]);
+            }
+        }
     }
 }

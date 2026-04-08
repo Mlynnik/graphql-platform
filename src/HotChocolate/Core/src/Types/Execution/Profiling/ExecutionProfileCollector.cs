@@ -14,12 +14,22 @@ internal sealed class ExecutionProfileCollector
     private readonly List<ExecutionProfileFieldEntry> _fields = [];
     private readonly Dictionary<string, ExecutionProfileFieldMetrics> _fieldMetrics = [];
     private readonly long _requestStartTimestamp = Stopwatch.GetTimestamp();
+    private readonly ExecutionProfilerOptions? _options;
     private long _requestDurationNanoseconds;
     private int _dataLoaderBatchCalls;
     private int _dataLoaderCacheHits;
     private int _dataLoaderCacheMisses;
 
     public const string ExtensionKey = "profiling";
+
+    public ExecutionProfileCollector()
+    {
+    }
+
+    public ExecutionProfileCollector(ExecutionProfilerOptions options)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+    }
 
     public void AddField(
         Path path,
@@ -39,6 +49,11 @@ internal sealed class ExecutionProfileCollector
         }
 
         var pathValue = path.Print();
+
+        if (_options?.ShouldProfileField(pathValue, coordinate, objectType, fieldName) == false)
+        {
+            return;
+        }
 
         if (coordinate.Length == 0)
         {
@@ -76,6 +91,13 @@ internal sealed class ExecutionProfileCollector
             keyCount = 0;
         }
 
+        if (_options is { } options
+            && path is { } dataLoaderPath
+            && !options.ShouldProfilePath(dataLoaderPath.Print()))
+        {
+            return;
+        }
+
         lock (_sync)
         {
             _dataLoaderBatchCalls++;
@@ -92,6 +114,13 @@ internal sealed class ExecutionProfileCollector
 
     public void AddDataLoaderCacheHit(Path? path)
     {
+        if (_options is { } options
+            && path is { } dataLoaderPath
+            && !options.ShouldProfilePath(dataLoaderPath.Print()))
+        {
+            return;
+        }
+
         lock (_sync)
         {
             _dataLoaderCacheHits++;

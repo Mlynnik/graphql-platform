@@ -2,6 +2,9 @@
   <Folder Name="/Execution.Abstractions.Benchmarks/">
     <Project Path="Execution.Abstractions.Benchmarks/HotChocolate.Execution.Abstractions.Benchmarks.csproj" />
   </Folder>
+  <Folder Name="/Execution.Profiling.Benchmarks/">
+    <Project Path="Execution.Profiling.Benchmarks/HotChocolate.Execution.Profiling.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/Validation.Benchmarks/">
     <Project Path="Validation.Benchmarks/HotChocolate.Validation.Benchmarks.csproj" />
   </Folder>

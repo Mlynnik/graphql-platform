@@ -29,8 +29,16 @@ internal sealed class ExecutionProfilerMiddleware
             return;
         }
 
+        if (TryGetOperationIdentity(context, out var knownOperationType, out var knownOperationName)
+            && !options.ShouldProfileOperation(knownOperationType, knownOperationName))
+        {
+            context.SetExecutionProfilerExecutionState(enabled: false);
+            await _next(context).ConfigureAwait(false);
+            return;
+        }
+
         context.SetExecutionProfilerExecutionState(enabled: true);
-        var profileCollector = new ExecutionProfileCollector();
+        var profileCollector = new ExecutionProfileCollector(options);
         context.Features.Set(profileCollector);
 
         try
@@ -45,24 +53,30 @@ internal sealed class ExecutionProfilerMiddleware
             {
                 var operationType = GetOperationType(context);
                 var operationName = GetOperationName(context);
-                var requestSample = profileCollector.CreateRequestSample(operationType, operationName);
-
-                IReadOnlyDictionary<string, object?>? aggregates = null;
-
-                if (options.AggregationEnabled)
+                if (options.ShouldProfileOperation(operationType, operationName))
                 {
-                    aggregationStore.Add(requestSample);
-                    aggregates = aggregationStore.CreateSnapshot();
+                    var requestSample = profileCollector.CreateRequestSample(operationType, operationName);
+
+                    if (!options.HasPathFilters || requestSample.Fields.Count > 0)
+                    {
+                        IReadOnlyDictionary<string, object?>? aggregates = null;
+
+                        if (options.AggregationEnabled)
+                        {
+                            aggregationStore.Add(requestSample);
+                            aggregates = aggregationStore.CreateSnapshot();
+                        }
+
+                        var profilingExtension = profileCollector.CreateResultExtension(options, aggregates);
+                        metricsExporter.Publish(requestSample, profilingExtension);
+                        LogSlowRequestIfNeeded(logger, options, requestSample);
+
+                        operationResult.Extensions =
+                            operationResult.Extensions.SetItem(
+                                ExecutionProfileCollector.ExtensionKey,
+                                profilingExtension);
+                    }
                 }
-
-                var profilingExtension = profileCollector.CreateResultExtension(options, aggregates);
-                metricsExporter.Publish(requestSample, profilingExtension);
-                LogSlowRequestIfNeeded(logger, options, requestSample);
-
-                operationResult.Extensions =
-                    operationResult.Extensions.SetItem(
-                        ExecutionProfileCollector.ExtensionKey,
-                        profilingExtension);
             }
 
             context.Features.Set<ExecutionProfileCollector>(null);
@@ -112,6 +126,30 @@ internal sealed class ExecutionProfilerMiddleware
         }
 
         return null;
+    }
+
+    private static bool TryGetOperationIdentity(
+        RequestContext context,
+        out string operationType,
+        out string? operationName)
+    {
+        if (context.TryGetOperation(out var operation))
+        {
+            operationType = operation.Kind.ToString().ToLowerInvariant();
+            operationName = operation.Name;
+            return true;
+        }
+
+        if (context.TryGetOperationDefinition(out var definition))
+        {
+            operationType = definition.Operation.ToString().ToLowerInvariant();
+            operationName = definition.Name?.Value;
+            return true;
+        }
+
+        operationType = default!;
+        operationName = null;
+        return false;
     }
 
     private static void LogSlowRequestIfNeeded(

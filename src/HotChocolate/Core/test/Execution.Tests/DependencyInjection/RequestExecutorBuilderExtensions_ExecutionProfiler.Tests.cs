@@ -94,6 +94,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.False(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.SlowFields, options.DetailLevel);
+        Assert.Empty(options.IncludedOperationTypes);
+        Assert.Empty(options.IncludedOperationNames);
+        Assert.Empty(options.IncludedPathPrefixes);
+        Assert.Empty(options.ExcludedObjectTypes);
+        Assert.Empty(options.ExcludedFieldCoordinates);
+        Assert.Empty(options.ExcludedFieldNames);
         Assert.Equal(3, options.NPlusOneListPatternThreshold);
         Assert.True(options.AggregationEnabled);
         Assert.Equal(200, options.SlidingWindowMaxRequests);
@@ -112,6 +118,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var configuration = new ConfigurationManager();
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:Enabled"] = "true";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:DetailLevel"] = "NPlusOneOnly";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationTypes:0"] = "mutation";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationNames:0"] = "NamedMutation";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedPathPrefixes:0"] = "child.nested";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:ExcludedObjectTypes:0"] = "ProfilerNested";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:ExcludedFieldCoordinates:0"] = "ProfilerQuery.greeting";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:ExcludedFieldNames:0"] = "asyncGreeting";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:NPlusOneListPatternThreshold"] = "7";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:AggregationEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowMaxRequests"] = "25";
@@ -130,6 +142,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.NPlusOneOnly, options.DetailLevel);
+        Assert.Contains("mutation", options.IncludedOperationTypes);
+        Assert.Contains("NamedMutation", options.IncludedOperationNames);
+        Assert.Contains("child.nested", options.IncludedPathPrefixes);
+        Assert.Contains("ProfilerNested", options.ExcludedObjectTypes);
+        Assert.Contains("ProfilerQuery.greeting", options.ExcludedFieldCoordinates);
+        Assert.Contains("asyncGreeting", options.ExcludedFieldNames);
         Assert.Equal(7, options.NPlusOneListPatternThreshold);
         Assert.False(options.AggregationEnabled);
         Assert.Equal(25, options.SlidingWindowMaxRequests);
@@ -153,6 +171,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                     {
                         options.Enabled = true;
                         options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                        options.IncludedOperationTypes.Add("query");
+                        options.IncludedOperationNames.Add("NamedQuery");
+                        options.IncludedPathPrefixes.Add("pureChild.pureNested");
+                        options.ExcludedObjectTypes.Add("ProfilerNested");
+                        options.ExcludedFieldCoordinates.Add("ProfilerQuery.greeting");
+                        options.ExcludedFieldNames.Add("asyncGreeting");
                         options.NPlusOneListPatternThreshold = 9;
                         options.AggregationEnabled = false;
                         options.SlidingWindowMaxRequests = 42;
@@ -169,6 +193,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.Full, options.DetailLevel);
+        Assert.Contains("query", options.IncludedOperationTypes);
+        Assert.Contains("NamedQuery", options.IncludedOperationNames);
+        Assert.Contains("pureChild.pureNested", options.IncludedPathPrefixes);
+        Assert.Contains("ProfilerNested", options.ExcludedObjectTypes);
+        Assert.Contains("ProfilerQuery.greeting", options.ExcludedFieldCoordinates);
+        Assert.Contains("asyncGreeting", options.ExcludedFieldNames);
         Assert.Equal(9, options.NPlusOneListPatternThreshold);
         Assert.False(options.AggregationEnabled);
         Assert.Equal(42, options.SlidingWindowMaxRequests);
@@ -247,6 +277,93 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.True(profiling.ContainsKey("requestDurationNs"));
         Assert.True(profiling.ContainsKey("fieldCount"));
         Assert.True(profiling.ContainsKey("fields"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_ProfileOnlyConfiguredOperationType_When_OperationTypeFilterIsSet()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.IncludedOperationTypes.Add("mutation");
+                }));
+
+        var queryResult = (await executor.ExecuteAsync("{ greeting }")).ExpectOperationResult();
+        var mutationResult = (await executor.ExecuteAsync("mutation { updateGreeting(value: \"hi\") }"))
+            .ExpectOperationResult();
+
+        Assert.False(HasProfilingExtension(queryResult));
+        Assert.True(HasProfilingExtension(mutationResult));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_ProfileOnlyConfiguredOperationName_When_OperationNameFilterIsSet()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.IncludedOperationNames.Add("ProfiledQuery");
+                }));
+
+        var profiled = (await executor.ExecuteAsync("query ProfiledQuery { greeting }"))
+            .ExpectOperationResult();
+        var skipped = (await executor.ExecuteAsync("query SkippedQuery { greeting }"))
+            .ExpectOperationResult();
+
+        Assert.True(HasProfilingExtension(profiled));
+        Assert.False(HasProfilingExtension(skipped));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_ProfileOnlyConfiguredPathPrefix_When_PathFilterIsSet()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.IncludedPathPrefixes.Add("child.nested");
+                }));
+
+        var profiled = (await executor.ExecuteAsync("{ greeting child { nested { name } } }"))
+            .ExpectOperationResult();
+        var skipped = (await executor.ExecuteAsync("{ greeting }")).ExpectOperationResult();
+        var profiledPaths = GetFieldPaths(profiled);
+
+        Assert.True(HasProfilingExtension(profiled));
+        Assert.Equal(2, profiledPaths.Count);
+        Assert.Contains("child.nested", profiledPaths);
+        Assert.Contains("child.nested.name", profiledPaths);
+        Assert.False(HasProfilingExtension(skipped));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_ExcludeConfiguredFieldsAndTypes_When_ExclusionsAreSet()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.ExcludedObjectTypes.Add("ProfilerNested");
+                    options.ExcludedFieldCoordinates.Add("ProfilerQuery.greeting");
+                    options.ExcludedFieldNames.Add("pureName");
+                }));
+
+        var result = (await executor.ExecuteAsync(
+                "{ greeting child { nested { name } } pureChild { pureNested { pureName } } }"))
+            .ExpectOperationResult();
+        var paths = GetFieldPaths(result);
+
+        Assert.DoesNotContain("greeting", paths);
+        Assert.DoesNotContain("child.nested.name", paths);
+        Assert.DoesNotContain("pureChild.pureNested.pureName", paths);
+        Assert.Contains("child", paths);
+        Assert.Contains("child.nested", paths);
     }
 
     [Fact]
@@ -713,6 +830,41 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_HandleConcurrentRequests_When_ProfilerIsEnabled()
+    {
+        const int requestCount = 64;
+
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.AggregationEnabled = true;
+                    options.SlidingWindowMaxRequests = requestCount + 8;
+                    options.SlidingWindowDuration = TimeSpan.FromMinutes(2);
+                }));
+
+        var tasks = new Task<IExecutionResult>[requestCount];
+        for (var i = 0; i < requestCount; i++)
+        {
+            tasks[i] = executor.ExecuteAsync("{ child { nested { name } } }");
+        }
+
+        var results = await Task.WhenAll(tasks);
+
+        for (var i = 0; i < results.Length; i++)
+        {
+            var operationResult = results[i].ExpectOperationResult();
+            Assert.True(HasProfilingExtension(operationResult));
+        }
+
+        var statistics = executor.GetExecutionProfilerStatistics();
+        var window = GetDictionaryValue(statistics, "window");
+
+        Assert.Equal(requestCount, GetIntValue(window, "requestCount"));
+    }
+
+    [Fact]
     public void AddExecutionProfiler_Should_RegisterServices_When_CalledOnServiceCollection()
     {
         var services = new ServiceCollection();
@@ -736,6 +888,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var configuration = new ConfigurationManager();
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:Enabled"] = "true";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:DetailLevel"] = "Full";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationTypes:0"] = "query";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationNames:0"] = "ConfiguredQuery";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedPathPrefixes:0"] = "child.nested";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:ExcludedObjectTypes:0"] = "ProfilerNested";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:ExcludedFieldCoordinates:0"] = "ProfilerQuery.greeting";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:ExcludedFieldNames:0"] = "asyncGreeting";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:AggregationEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowMaxRequests"] = "12";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:00:30";
@@ -754,6 +912,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.Full, options.DetailLevel);
+        Assert.Contains("query", options.IncludedOperationTypes);
+        Assert.Contains("ConfiguredQuery", options.IncludedOperationNames);
+        Assert.Contains("child.nested", options.IncludedPathPrefixes);
+        Assert.Contains("ProfilerNested", options.ExcludedObjectTypes);
+        Assert.Contains("ProfilerQuery.greeting", options.ExcludedFieldCoordinates);
+        Assert.Contains("asyncGreeting", options.ExcludedFieldNames);
         Assert.False(options.AggregationEnabled);
         Assert.Equal(12, options.SlidingWindowMaxRequests);
         Assert.Equal(TimeSpan.FromSeconds(30), options.SlidingWindowDuration);
@@ -934,6 +1098,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         }
     }
 
+    private static bool HasProfilingExtension(OperationResult result)
+        => result.Extensions.ContainsKey("profiling");
+
     private static IReadOnlyDictionary<string, object?> GetProfilingExtension(OperationResult result)
     {
         Assert.True(result.Extensions.TryGetValue("profiling", out var profilingValue));
@@ -1022,6 +1189,23 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         }
 
         return fieldProfiles;
+    }
+
+    private static List<string> GetFieldPaths(OperationResult result)
+    {
+        var fieldProfiles = GetFieldProfiles(result);
+        var paths = new List<string>(fieldProfiles.Count);
+
+        for (var i = 0; i < fieldProfiles.Count; i++)
+        {
+            if (fieldProfiles[i].TryGetValue("path", out var value)
+                && value is string path)
+            {
+                paths.Add(path);
+            }
+        }
+
+        return paths;
     }
 
     private static int GetFieldDepth(IReadOnlyDictionary<string, object?> fieldProfile)
