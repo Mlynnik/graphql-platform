@@ -42,6 +42,8 @@ public static class ExecutionProfilerServiceCollectionExtensions
                 return new ExecutionProfilerState(options.Enabled);
             });
 
+        services.TryAddSingleton<IExecutionProfilerAggregationStore, ExecutionProfilerSlidingWindowAggregator>();
+
         return services;
     }
 
@@ -115,6 +117,29 @@ public static class ExecutionProfilerServiceCollectionExtensions
                     && threshold > 0)
                 {
                     options.NPlusOneListPatternThreshold = threshold;
+                }
+
+                if (bool.TryParse(section["AggregationEnabled"], out var aggregationEnabled))
+                {
+                    options.AggregationEnabled = aggregationEnabled;
+                }
+
+                if (int.TryParse(section["SlidingWindowMaxRequests"], out var maxRequests)
+                    && maxRequests > 0)
+                {
+                    options.SlidingWindowMaxRequests = maxRequests;
+                }
+
+                var slidingWindowDuration = section["SlidingWindowDuration"];
+                if (TimeSpan.TryParse(slidingWindowDuration, out var parsedWindowDuration)
+                    && parsedWindowDuration > TimeSpan.Zero)
+                {
+                    options.SlidingWindowDuration = parsedWindowDuration;
+                }
+                else if (int.TryParse(slidingWindowDuration, out var durationSeconds)
+                    && durationSeconds > 0)
+                {
+                    options.SlidingWindowDuration = TimeSpan.FromSeconds(durationSeconds);
                 }
             });
     }

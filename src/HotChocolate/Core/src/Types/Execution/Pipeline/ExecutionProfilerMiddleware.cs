@@ -16,6 +16,7 @@ internal sealed class ExecutionProfilerMiddleware
     {
         var isEnabled = context.ResolveExecutionProfilerEnabled();
         var options = context.GetExecutionProfilerOptions();
+        var aggregationStore = context.Schema.Services.GetRequiredService<IExecutionProfilerAggregationStore>();
 
         // Ensure profiler state can still be resolved even when middleware is bypassed.
         if (!isEnabled)
@@ -39,10 +40,22 @@ internal sealed class ExecutionProfilerMiddleware
 
             if (context.Result is OperationResult operationResult)
             {
+                IReadOnlyDictionary<string, object?>? aggregates = null;
+
+                if (options.AggregationEnabled)
+                {
+                    var operationType = GetOperationType(context);
+                    var operationName = GetOperationName(context);
+                    var requestSample = profileCollector.CreateRequestSample(operationType, operationName);
+
+                    aggregationStore.Add(requestSample);
+                    aggregates = aggregationStore.CreateSnapshot();
+                }
+
                 operationResult.Extensions =
                     operationResult.Extensions.SetItem(
                         ExecutionProfileCollector.ExtensionKey,
-                        profileCollector.CreateResultExtension(options));
+                        profileCollector.CreateResultExtension(options, aggregates));
             }
 
             context.Features.Set<ExecutionProfileCollector>(null);
@@ -56,9 +69,40 @@ internal sealed class ExecutionProfilerMiddleware
                 // Ensure required services are resolvable when the pipeline is built.
                 _ = core.SchemaServices.GetRequiredService<IExecutionProfilerState>();
                 _ = core.SchemaServices.GetRequiredService<ExecutionProfilerOptions>();
+                _ = core.SchemaServices.GetRequiredService<IExecutionProfilerAggregationStore>();
 
                 var middleware = new ExecutionProfilerMiddleware(next);
                 return context => middleware.InvokeAsync(context);
             },
             WellKnownRequestMiddleware.ExecutionProfilerMiddleware);
+
+    private static string GetOperationType(RequestContext context)
+    {
+        if (context.TryGetOperation(out var operation))
+        {
+            return operation.Kind.ToString().ToLowerInvariant();
+        }
+
+        if (context.TryGetOperationDefinition(out var definition))
+        {
+            return definition.Operation.ToString().ToLowerInvariant();
+        }
+
+        return "unknown";
+    }
+
+    private static string? GetOperationName(RequestContext context)
+    {
+        if (context.TryGetOperation(out var operation))
+        {
+            return operation.Name;
+        }
+
+        if (context.TryGetOperationDefinition(out var definition))
+        {
+            return definition.Name?.Value;
+        }
+
+        return null;
+    }
 }

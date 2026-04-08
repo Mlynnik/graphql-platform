@@ -28,6 +28,7 @@ public static partial class RequestExecutorBuilderExtensions
         return builder
             .AddApplicationService<ExecutionProfilerOptions>()
             .AddApplicationService<IExecutionProfilerState>()
+            .AddApplicationService<IExecutionProfilerAggregationStore>()
             .AddDiagnosticEventListener<ExecutionProfilerDiagnosticEventListener>()
             .AddDiagnosticEventListener<ExecutionProfilerDataLoaderDiagnosticEventListener>()
             .UseRequest(

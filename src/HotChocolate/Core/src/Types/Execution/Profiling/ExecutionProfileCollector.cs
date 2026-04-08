@@ -21,19 +21,47 @@ internal sealed class ExecutionProfileCollector
 
     public const string ExtensionKey = "profiling";
 
-    public void AddField(Path path, long durationNanoseconds)
+    public void AddField(
+        Path path,
+        long durationNanoseconds,
+        string coordinate,
+        string objectType,
+        string fieldName)
     {
         ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(coordinate);
+        ArgumentNullException.ThrowIfNull(objectType);
+        ArgumentNullException.ThrowIfNull(fieldName);
 
         if (durationNanoseconds < 0)
         {
             durationNanoseconds = 0;
         }
 
+        var pathValue = path.Print();
+
+        if (coordinate.Length == 0)
+        {
+            coordinate = pathValue;
+        }
+
+        if (objectType.Length == 0)
+        {
+            objectType = "Unknown";
+        }
+
+        if (fieldName.Length == 0)
+        {
+            fieldName = pathValue;
+        }
+
         var field = new ExecutionProfileFieldEntry(
-            path.Print(),
+            pathValue,
             GetFieldDepth(path),
-            durationNanoseconds);
+            durationNanoseconds,
+            coordinate,
+            objectType,
+            fieldName);
 
         lock (_sync)
         {
@@ -82,75 +110,54 @@ internal sealed class ExecutionProfileCollector
     }
 
     public IReadOnlyDictionary<string, object?> CreateResultExtension(
-        ExecutionProfilerOptions options)
+        ExecutionProfilerOptions options,
+        IReadOnlyDictionary<string, object?>? aggregates = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        ExecutionProfileFieldEntry[] fields;
-        Dictionary<string, ExecutionProfileFieldMetricsSnapshot> fieldMetrics;
-        int dataLoaderBatchCalls;
-        int dataLoaderCacheHits;
-        int dataLoaderCacheMisses;
+        var snapshot = CaptureSnapshot();
 
-        lock (_sync)
+        var serializedFields = new object?[snapshot.Fields.Length];
+
+        for (var i = 0; i < snapshot.Fields.Length; i++)
         {
-            fields = [.. _fields];
-            fieldMetrics = new Dictionary<string, ExecutionProfileFieldMetricsSnapshot>(
-                _fieldMetrics.Count,
-                StringComparer.Ordinal);
-
-            foreach (var fieldMetric in _fieldMetrics)
-            {
-                fieldMetrics[fieldMetric.Key] =
-                    new ExecutionProfileFieldMetricsSnapshot(
-                        fieldMetric.Value.DataLoaderBatchCalls,
-                        fieldMetric.Value.DataLoaderCacheHits,
-                        fieldMetric.Value.DataLoaderCacheMisses);
-            }
-
-            dataLoaderBatchCalls = _dataLoaderBatchCalls;
-            dataLoaderCacheHits = _dataLoaderCacheHits;
-            dataLoaderCacheMisses = _dataLoaderCacheMisses;
-        }
-
-        var serializedFields = new object?[fields.Length];
-
-        for (var i = 0; i < fields.Length; i++)
-        {
-            fieldMetrics.TryGetValue(fields[i].Path, out var fieldMetric);
+            var field = snapshot.Fields[i];
+            snapshot.FieldMetrics.TryGetValue(field.Path, out var fieldMetric);
             serializedFields[i] = new Dictionary<string, object?>
             {
-                ["path"] = fields[i].Path,
-                ["depth"] = fields[i].Depth,
-                ["durationNs"] = fields[i].DurationNanoseconds,
+                ["path"] = field.Path,
+                ["depth"] = field.Depth,
+                ["durationNs"] = field.DurationNanoseconds,
+                ["coordinate"] = field.Coordinate,
+                ["objectType"] = field.ObjectType,
+                ["fieldName"] = field.FieldName,
                 ["dataLoaderBatchCalls"] = fieldMetric?.DataLoaderBatchCalls ?? 0,
                 ["dataLoaderCacheHits"] = fieldMetric?.DataLoaderCacheHits ?? 0,
                 ["dataLoaderCacheMisses"] = fieldMetric?.DataLoaderCacheMisses ?? 0
             };
         }
 
-        var requestDuration = Volatile.Read(ref _requestDurationNanoseconds);
-        if (requestDuration == 0)
-        {
-            requestDuration = GetElapsedNanoseconds(_requestStartTimestamp);
-        }
-
         var result = new Dictionary<string, object?>
         {
-            ["requestDurationNs"] = requestDuration,
-            ["fieldCount"] = fields.Length,
-            ["dataLoaderBatchCalls"] = dataLoaderBatchCalls,
-            ["dataLoaderCacheHits"] = dataLoaderCacheHits,
-            ["dataLoaderCacheMisses"] = dataLoaderCacheMisses,
+            ["requestDurationNs"] = snapshot.RequestDurationNanoseconds,
+            ["fieldCount"] = snapshot.Fields.Length,
+            ["dataLoaderBatchCalls"] = snapshot.DataLoaderBatchCalls,
+            ["dataLoaderCacheHits"] = snapshot.DataLoaderCacheHits,
+            ["dataLoaderCacheMisses"] = snapshot.DataLoaderCacheMisses,
             ["fields"] = serializedFields
         };
+
+        if (aggregates is { Count: > 0 })
+        {
+            result["aggregates"] = aggregates;
+        }
 
         if (options.DetailLevel is ExecutionProfilerDetailLevel.Full
             or ExecutionProfilerDetailLevel.NPlusOneOnly)
         {
             var nPlusOneIssues = AnalyzeNPlusOneIssues(
-                fields,
-                fieldMetrics,
+                snapshot.Fields,
+                snapshot.FieldMetrics,
                 options.NPlusOneListPatternThreshold);
 
             result["nPlusOne"] = new Dictionary<string, object?>
@@ -161,6 +168,42 @@ internal sealed class ExecutionProfileCollector
         }
 
         return result;
+    }
+
+    public ExecutionProfilerRequestSample CreateRequestSample(
+        string operationType,
+        string? operationName)
+        => CreateRequestSample(operationType, operationName, DateTimeOffset.UtcNow);
+
+    public ExecutionProfilerRequestSample CreateRequestSample(
+        string operationType,
+        string? operationName,
+        DateTimeOffset capturedAtUtc)
+    {
+        if (string.IsNullOrWhiteSpace(operationType))
+        {
+            operationType = "unknown";
+        }
+
+        var snapshot = CaptureRequestSampleSnapshot();
+        var fields = new ExecutionProfilerFieldSample[snapshot.Fields.Length];
+
+        for (var i = 0; i < snapshot.Fields.Length; i++)
+        {
+            var field = snapshot.Fields[i];
+            fields[i] = new ExecutionProfilerFieldSample(
+                field.Coordinate,
+                field.ObjectType,
+                field.FieldName,
+                field.DurationNanoseconds);
+        }
+
+        return new ExecutionProfilerRequestSample(
+            capturedAtUtc,
+            operationType,
+            operationName,
+            snapshot.RequestDurationNanoseconds,
+            fields);
     }
 
     private ExecutionProfileFieldMetrics GetOrCreateFieldMetrics(string path)
@@ -194,6 +237,68 @@ internal sealed class ExecutionProfileCollector
 
     private static long GetElapsedNanoseconds(long startTimestamp)
         => Stopwatch.GetElapsedTime(startTimestamp).Ticks * 100;
+
+    private CollectorSnapshot CaptureSnapshot()
+    {
+        ExecutionProfileFieldEntry[] fields;
+        Dictionary<string, ExecutionProfileFieldMetricsSnapshot> fieldMetrics;
+        int dataLoaderBatchCalls;
+        int dataLoaderCacheHits;
+        int dataLoaderCacheMisses;
+
+        lock (_sync)
+        {
+            fields = [.. _fields];
+            fieldMetrics = new Dictionary<string, ExecutionProfileFieldMetricsSnapshot>(
+                _fieldMetrics.Count,
+                StringComparer.Ordinal);
+
+            foreach (var fieldMetric in _fieldMetrics)
+            {
+                fieldMetrics[fieldMetric.Key] =
+                    new ExecutionProfileFieldMetricsSnapshot(
+                        fieldMetric.Value.DataLoaderBatchCalls,
+                        fieldMetric.Value.DataLoaderCacheHits,
+                        fieldMetric.Value.DataLoaderCacheMisses);
+            }
+
+            dataLoaderBatchCalls = _dataLoaderBatchCalls;
+            dataLoaderCacheHits = _dataLoaderCacheHits;
+            dataLoaderCacheMisses = _dataLoaderCacheMisses;
+        }
+
+        var requestDuration = Volatile.Read(ref _requestDurationNanoseconds);
+        if (requestDuration == 0)
+        {
+            requestDuration = GetElapsedNanoseconds(_requestStartTimestamp);
+        }
+
+        return new CollectorSnapshot(
+            fields,
+            fieldMetrics,
+            requestDuration,
+            dataLoaderBatchCalls,
+            dataLoaderCacheHits,
+            dataLoaderCacheMisses);
+    }
+
+    private RequestSampleSnapshot CaptureRequestSampleSnapshot()
+    {
+        ExecutionProfileFieldEntry[] fields;
+
+        lock (_sync)
+        {
+            fields = [.. _fields];
+        }
+
+        var requestDuration = Volatile.Read(ref _requestDurationNanoseconds);
+        if (requestDuration == 0)
+        {
+            requestDuration = GetElapsedNanoseconds(_requestStartTimestamp);
+        }
+
+        return new RequestSampleSnapshot(fields, requestDuration);
+    }
 
     private static object?[] AnalyzeNPlusOneIssues(
         IReadOnlyList<ExecutionProfileFieldEntry> fields,
@@ -296,7 +401,10 @@ internal sealed class ExecutionProfileCollector
     private sealed record ExecutionProfileFieldEntry(
         string Path,
         int Depth,
-        long DurationNanoseconds);
+        long DurationNanoseconds,
+        string Coordinate,
+        string ObjectType,
+        string FieldName);
 
     private sealed class ExecutionProfileFieldMetrics
     {
@@ -322,4 +430,16 @@ internal sealed class ExecutionProfileCollector
 
         public int DataLoaderCacheHits { get; set; }
     }
+
+    private sealed record CollectorSnapshot(
+        ExecutionProfileFieldEntry[] Fields,
+        Dictionary<string, ExecutionProfileFieldMetricsSnapshot> FieldMetrics,
+        long RequestDurationNanoseconds,
+        int DataLoaderBatchCalls,
+        int DataLoaderCacheHits,
+        int DataLoaderCacheMisses);
+
+    private sealed record RequestSampleSnapshot(
+        ExecutionProfileFieldEntry[] Fields,
+        long RequestDurationNanoseconds);
 }

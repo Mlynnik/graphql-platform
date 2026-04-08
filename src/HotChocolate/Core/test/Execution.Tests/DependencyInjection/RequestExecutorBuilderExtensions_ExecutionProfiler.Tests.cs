@@ -93,6 +93,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.False(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.SlowFields, options.DetailLevel);
         Assert.Equal(3, options.NPlusOneListPatternThreshold);
+        Assert.True(options.AggregationEnabled);
+        Assert.Equal(200, options.SlidingWindowMaxRequests);
+        Assert.Equal(TimeSpan.FromMinutes(5), options.SlidingWindowDuration);
         Assert.False(state.IsEnabled);
     }
 
@@ -103,6 +106,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:Enabled"] = "true";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:DetailLevel"] = "NPlusOneOnly";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:NPlusOneListPatternThreshold"] = "7";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:AggregationEnabled"] = "false";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowMaxRequests"] = "25";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:02:00";
 
         var executor = await CreateExecutorAsync(
             configure: builder => builder.AddExecutionProfiler(configuration));
@@ -113,6 +119,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.NPlusOneOnly, options.DetailLevel);
         Assert.Equal(7, options.NPlusOneListPatternThreshold);
+        Assert.False(options.AggregationEnabled);
+        Assert.Equal(25, options.SlidingWindowMaxRequests);
+        Assert.Equal(TimeSpan.FromMinutes(2), options.SlidingWindowDuration);
         Assert.True(state.IsEnabled);
     }
 
@@ -128,6 +137,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                         options.Enabled = true;
                         options.DetailLevel = ExecutionProfilerDetailLevel.Full;
                         options.NPlusOneListPatternThreshold = 9;
+                        options.AggregationEnabled = false;
+                        options.SlidingWindowMaxRequests = 42;
+                        options.SlidingWindowDuration = TimeSpan.FromSeconds(45);
                     }));
 
         var options = executor.GetExecutionProfilerOptions();
@@ -136,6 +148,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.Full, options.DetailLevel);
         Assert.Equal(9, options.NPlusOneListPatternThreshold);
+        Assert.False(options.AggregationEnabled);
+        Assert.Equal(42, options.SlidingWindowMaxRequests);
+        Assert.Equal(TimeSpan.FromSeconds(45), options.SlidingWindowDuration);
         Assert.True(state.IsEnabled);
     }
 
@@ -295,6 +310,154 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_AddAggregateStatisticsGroupedByOperationType_When_AggregationEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                    options.AggregationEnabled = true;
+                    options.SlidingWindowMaxRequests = 50;
+                    options.SlidingWindowDuration = TimeSpan.FromMinutes(10);
+                }));
+
+        await executor.ExecuteAsync("{ greeting }");
+
+        var result = (await executor.ExecuteAsync("mutation { updateGreeting(value: \"hello\") }"))
+            .ExpectOperationResult();
+
+        var aggregates = GetAggregatesExtension(GetProfilingExtension(result));
+        var byOperationType = GetAggregateEntries(aggregates, "byOperationType");
+        var queryStats = GetAggregateEntry(byOperationType, "operationType", "query");
+        var mutationStats = GetAggregateEntry(byOperationType, "operationType", "mutation");
+
+        Assert.Equal(1, GetIntValue(queryStats, "requestCount"));
+        Assert.Equal(1, GetIntValue(mutationStats, "requestCount"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_EvictOldRequests_When_SlidingWindowMaxRequestsExceeded()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                    options.AggregationEnabled = true;
+                    options.SlidingWindowMaxRequests = 2;
+                    options.SlidingWindowDuration = TimeSpan.FromHours(1);
+                }));
+
+        await executor.ExecuteAsync("{ greeting }");
+        await executor.ExecuteAsync("{ greeting }");
+
+        var result = (await executor.ExecuteAsync("{ greeting }")).ExpectOperationResult();
+
+        var aggregates = GetAggregatesExtension(GetProfilingExtension(result));
+        var window = GetDictionaryValue(aggregates, "window");
+        var byOperationType = GetAggregateEntries(aggregates, "byOperationType");
+        var queryStats = GetAggregateEntry(byOperationType, "operationType", "query");
+
+        Assert.Equal(2, GetIntValue(window, "requestCount"));
+        Assert.Equal(2, GetIntValue(queryStats, "requestCount"));
+    }
+
+    [Fact]
+    public void SlidingWindowAggregator_Should_CalculatePercentiles_When_CollectingFieldDurations()
+    {
+        var options = new ExecutionProfilerOptions
+        {
+            AggregationEnabled = true,
+            SlidingWindowMaxRequests = 10,
+            SlidingWindowDuration = TimeSpan.FromHours(1)
+        };
+        var aggregator = new ExecutionProfilerSlidingWindowAggregator(options);
+        var now = DateTimeOffset.UtcNow;
+
+        for (var i = 1; i <= 5; i++)
+        {
+            var duration = i * 10L;
+            aggregator.Add(
+                new ExecutionProfilerRequestSample(
+                    now.AddSeconds(i),
+                    "query",
+                    "PercentileProbe",
+                    duration,
+                    [
+                        new ExecutionProfilerFieldSample(
+                            "Query.greeting",
+                            "Query",
+                            "greeting",
+                            duration)
+                    ]));
+        }
+
+        var snapshot = aggregator.CreateSnapshot();
+        var byField = GetAggregateEntries(snapshot, "byField");
+        var greetingStats = GetAggregateEntry(byField, "coordinate", "Query.greeting");
+        var durationStats = GetDictionaryValue(greetingStats, "durationNs");
+
+        Assert.Equal(10L, GetLongValue(durationStats, "minNs"));
+        Assert.Equal(50L, GetLongValue(durationStats, "maxNs"));
+        Assert.Equal(30.0d, GetDoubleValue(durationStats, "avgNs"), 5);
+        Assert.Equal(30L, GetLongValue(durationStats, "p50Ns"));
+        Assert.Equal(50L, GetLongValue(durationStats, "p95Ns"));
+        Assert.Equal(50L, GetLongValue(durationStats, "p99Ns"));
+    }
+
+    [Fact]
+    public void SlidingWindowAggregator_Should_EvictRequestsOutsideConfiguredDuration()
+    {
+        var options = new ExecutionProfilerOptions
+        {
+            AggregationEnabled = true,
+            SlidingWindowMaxRequests = 100,
+            SlidingWindowDuration = TimeSpan.FromSeconds(10)
+        };
+        var aggregator = new ExecutionProfilerSlidingWindowAggregator(options);
+        var now = DateTimeOffset.UtcNow;
+
+        aggregator.Add(
+            new ExecutionProfilerRequestSample(
+                now.AddSeconds(-20),
+                "query",
+                "Expired",
+                5,
+                [
+                    new ExecutionProfilerFieldSample(
+                        "Query.expired",
+                        "Query",
+                        "expired",
+                        5)
+                ]));
+
+        aggregator.Add(
+            new ExecutionProfilerRequestSample(
+                now,
+                "query",
+                "Current",
+                10,
+                [
+                    new ExecutionProfilerFieldSample(
+                        "Query.current",
+                        "Query",
+                        "current",
+                        10)
+                ]));
+
+        var snapshot = aggregator.CreateSnapshot();
+        var window = GetDictionaryValue(snapshot, "window");
+        var byOperation = GetAggregateEntries(snapshot, "byOperation");
+        var currentStats = GetAggregateEntry(byOperation, "operationName", "Current");
+
+        Assert.Equal(1, GetIntValue(window, "requestCount"));
+        Assert.Equal(1, GetIntValue(currentStats, "requestCount"));
+    }
+
+    [Fact]
     public async Task IsExecutionProfilerEnabled_Should_RespectRuntimeAndRequestOverrides_When_ExecutingRequests()
     {
         var listener = new CaptureProfilerStateListener();
@@ -328,9 +491,11 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var serviceProvider = services.BuildServiceProvider();
         var options = serviceProvider.GetRequiredService<ExecutionProfilerOptions>();
         var state = serviceProvider.GetRequiredService<IExecutionProfilerState>();
+        var aggregationStore = serviceProvider.GetRequiredService<IExecutionProfilerAggregationStore>();
 
         Assert.False(options.Enabled);
         Assert.False(state.IsEnabled);
+        Assert.NotNull(aggregationStore);
     }
 
     [Fact]
@@ -339,6 +504,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var configuration = new ConfigurationManager();
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:Enabled"] = "true";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:DetailLevel"] = "Full";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:AggregationEnabled"] = "false";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowMaxRequests"] = "12";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:00:30";
 
         var services = new ServiceCollection();
         services.ConfigureExecutionProfiler(configuration);
@@ -349,6 +517,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.Full, options.DetailLevel);
+        Assert.False(options.AggregationEnabled);
+        Assert.Equal(12, options.SlidingWindowMaxRequests);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.SlidingWindowDuration);
         Assert.True(state.IsEnabled);
     }
 
@@ -357,7 +528,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     {
         var builder = new ServiceCollection()
             .AddGraphQLServer()
-            .AddQueryType<ProfilerQuery>();
+            .AddQueryType<ProfilerQuery>()
+            .AddMutationType<ProfilerMutation>();
 
         configure?.Invoke(builder);
 
@@ -395,6 +567,11 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
             return users;
         }
+    }
+
+    public sealed class ProfilerMutation
+    {
+        public string UpdateGreeting(string value) => value;
     }
 
     public sealed class ProfilerChild
@@ -459,6 +636,55 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         return Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(profilingValue);
     }
 
+    private static IReadOnlyDictionary<string, object?> GetAggregatesExtension(
+        IReadOnlyDictionary<string, object?> profiling)
+    {
+        Assert.True(profiling.TryGetValue("aggregates", out var aggregates));
+        return Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(aggregates);
+    }
+
+    private static List<IReadOnlyDictionary<string, object?>> GetAggregateEntries(
+        IReadOnlyDictionary<string, object?> aggregates,
+        string key)
+    {
+        Assert.True(aggregates.TryGetValue(key, out var entriesValue));
+        var entries = Assert.IsAssignableFrom<IReadOnlyList<object?>>(entriesValue);
+        var result = new List<IReadOnlyDictionary<string, object?>>(entries.Count);
+
+        for (var i = 0; i < entries.Count; i++)
+        {
+            result.Add(Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(entries[i]));
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, object?> GetAggregateEntry(
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> entries,
+        string key,
+        string expectedValue)
+    {
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].TryGetValue(key, out var keyValue)
+                && keyValue is string actualValue
+                && actualValue.Equals(expectedValue, StringComparison.Ordinal))
+            {
+                return entries[i];
+            }
+        }
+
+        throw new InvalidOperationException($"Aggregate entry '{expectedValue}' for key '{key}' was not found.");
+    }
+
+    private static IReadOnlyDictionary<string, object?> GetDictionaryValue(
+        IReadOnlyDictionary<string, object?> values,
+        string key)
+    {
+        Assert.True(values.TryGetValue(key, out var value));
+        return Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(value);
+    }
+
     private static IReadOnlyDictionary<string, object?> GetFieldProfile(
         OperationResult result,
         string path)
@@ -512,6 +738,22 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     {
         Assert.True(values.TryGetValue(key, out var value));
         return Assert.IsType<int>(value);
+    }
+
+    private static long GetLongValue(
+        IReadOnlyDictionary<string, object?> values,
+        string key)
+    {
+        Assert.True(values.TryGetValue(key, out var value));
+        return Assert.IsType<long>(value);
+    }
+
+    private static double GetDoubleValue(
+        IReadOnlyDictionary<string, object?> values,
+        string key)
+    {
+        Assert.True(values.TryGetValue(key, out var value));
+        return Assert.IsType<double>(value);
     }
 
     private static IReadOnlyDictionary<string, object?> GetNPlusOneExtension(

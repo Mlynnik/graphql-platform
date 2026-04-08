@@ -372,7 +372,10 @@ internal static class ResolverTaskFactory
         {
             profileCollector!.AddField(
                 fieldValue.Path,
-                Stopwatch.GetElapsedTime(startTimestamp).Ticks * 100);
+                Stopwatch.GetElapsedTime(startTimestamp).Ticks * 100,
+                selection.Field.Coordinate.ToString(),
+                selection.DeclaringType.Name,
+                selection.Field.Name);
         }
     }
 
