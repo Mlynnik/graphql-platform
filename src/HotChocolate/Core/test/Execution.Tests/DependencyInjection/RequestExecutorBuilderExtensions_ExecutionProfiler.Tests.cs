@@ -1007,6 +1007,46 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_KeepProfilingExtension_When_ResolverThrowsException()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                }));
+
+        var result = (await executor.ExecuteAsync("{ throwGreeting }")).ExpectOperationResult();
+        var profiling = GetProfilingExtension(result);
+        var paths = GetFieldPaths(result);
+
+        Assert.NotEmpty(result.Errors);
+        Assert.Contains("throwGreeting", paths);
+        Assert.True(GetLongValue(profiling, "requestDurationNs") >= 0);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_KeepProfilingExtension_When_ResolverThrowsOperationCanceledException()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                }));
+
+        var result = (await executor.ExecuteAsync("{ cancelGreeting }")).ExpectOperationResult();
+        var profiling = GetProfilingExtension(result);
+        var paths = GetFieldPaths(result);
+
+        Assert.NotEmpty(result.Errors);
+        Assert.Contains("cancelGreeting", paths);
+        Assert.True(GetLongValue(profiling, "requestDurationNs") >= 0);
+    }
+
+    [Fact]
     public void AddExecutionProfiler_Should_RegisterServices_When_CalledOnServiceCollection()
     {
         var services = new ServiceCollection();
@@ -1120,6 +1160,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
             await Task.Delay(20);
             return "Slow greeting";
         }
+
+        public string ThrowGreeting()
+            => throw new InvalidOperationException("Profiler test exception");
+
+        public string CancelGreeting()
+            => throw new OperationCanceledException("Profiler test cancellation");
 
         public ProfilerChild Child(IResolverContext context) => new();
 
