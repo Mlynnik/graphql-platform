@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Threading;
 
 namespace HotChocolate.Execution.Profiling;
@@ -80,28 +81,51 @@ internal sealed class ExecutionProfileCollector
         Volatile.Write(ref _requestDurationNanoseconds, GetElapsedNanoseconds(_requestStartTimestamp));
     }
 
-    public IReadOnlyDictionary<string, object?> CreateResultExtension()
+    public IReadOnlyDictionary<string, object?> CreateResultExtension(
+        ExecutionProfilerOptions options)
     {
+        ArgumentNullException.ThrowIfNull(options);
+
         ExecutionProfileFieldEntry[] fields;
+        Dictionary<string, ExecutionProfileFieldMetricsSnapshot> fieldMetrics;
+        int dataLoaderBatchCalls;
+        int dataLoaderCacheHits;
+        int dataLoaderCacheMisses;
 
         lock (_sync)
         {
             fields = [.. _fields];
+            fieldMetrics = new Dictionary<string, ExecutionProfileFieldMetricsSnapshot>(
+                _fieldMetrics.Count,
+                StringComparer.Ordinal);
+
+            foreach (var fieldMetric in _fieldMetrics)
+            {
+                fieldMetrics[fieldMetric.Key] =
+                    new ExecutionProfileFieldMetricsSnapshot(
+                        fieldMetric.Value.DataLoaderBatchCalls,
+                        fieldMetric.Value.DataLoaderCacheHits,
+                        fieldMetric.Value.DataLoaderCacheMisses);
+            }
+
+            dataLoaderBatchCalls = _dataLoaderBatchCalls;
+            dataLoaderCacheHits = _dataLoaderCacheHits;
+            dataLoaderCacheMisses = _dataLoaderCacheMisses;
         }
 
         var serializedFields = new object?[fields.Length];
 
         for (var i = 0; i < fields.Length; i++)
         {
-            _fieldMetrics.TryGetValue(fields[i].Path, out var fieldMetrics);
+            fieldMetrics.TryGetValue(fields[i].Path, out var fieldMetric);
             serializedFields[i] = new Dictionary<string, object?>
             {
                 ["path"] = fields[i].Path,
                 ["depth"] = fields[i].Depth,
                 ["durationNs"] = fields[i].DurationNanoseconds,
-                ["dataLoaderBatchCalls"] = fieldMetrics?.DataLoaderBatchCalls ?? 0,
-                ["dataLoaderCacheHits"] = fieldMetrics?.DataLoaderCacheHits ?? 0,
-                ["dataLoaderCacheMisses"] = fieldMetrics?.DataLoaderCacheMisses ?? 0
+                ["dataLoaderBatchCalls"] = fieldMetric?.DataLoaderBatchCalls ?? 0,
+                ["dataLoaderCacheHits"] = fieldMetric?.DataLoaderCacheHits ?? 0,
+                ["dataLoaderCacheMisses"] = fieldMetric?.DataLoaderCacheMisses ?? 0
             };
         }
 
@@ -111,15 +135,32 @@ internal sealed class ExecutionProfileCollector
             requestDuration = GetElapsedNanoseconds(_requestStartTimestamp);
         }
 
-        return new Dictionary<string, object?>
+        var result = new Dictionary<string, object?>
         {
             ["requestDurationNs"] = requestDuration,
             ["fieldCount"] = fields.Length,
-            ["dataLoaderBatchCalls"] = _dataLoaderBatchCalls,
-            ["dataLoaderCacheHits"] = _dataLoaderCacheHits,
-            ["dataLoaderCacheMisses"] = _dataLoaderCacheMisses,
+            ["dataLoaderBatchCalls"] = dataLoaderBatchCalls,
+            ["dataLoaderCacheHits"] = dataLoaderCacheHits,
+            ["dataLoaderCacheMisses"] = dataLoaderCacheMisses,
             ["fields"] = serializedFields
         };
+
+        if (options.DetailLevel is ExecutionProfilerDetailLevel.Full
+            or ExecutionProfilerDetailLevel.NPlusOneOnly)
+        {
+            var nPlusOneIssues = AnalyzeNPlusOneIssues(
+                fields,
+                fieldMetrics,
+                options.NPlusOneListPatternThreshold);
+
+            result["nPlusOne"] = new Dictionary<string, object?>
+            {
+                ["issueCount"] = nPlusOneIssues.Length,
+                ["issues"] = nPlusOneIssues
+            };
+        }
+
+        return result;
     }
 
     private ExecutionProfileFieldMetrics GetOrCreateFieldMetrics(string path)
@@ -154,6 +195,104 @@ internal sealed class ExecutionProfileCollector
     private static long GetElapsedNanoseconds(long startTimestamp)
         => Stopwatch.GetElapsedTime(startTimestamp).Ticks * 100;
 
+    private static object?[] AnalyzeNPlusOneIssues(
+        IReadOnlyList<ExecutionProfileFieldEntry> fields,
+        IReadOnlyDictionary<string, ExecutionProfileFieldMetricsSnapshot> fieldMetrics,
+        int threshold)
+    {
+        if (threshold < 2)
+        {
+            threshold = 2;
+        }
+
+        var patternMetrics = new Dictionary<string, NPlusOnePatternMetrics>(StringComparer.Ordinal);
+
+        for (var i = 0; i < fields.Count; i++)
+        {
+            var path = fields[i].Path;
+            var normalizedPath = NormalizeIndexedPath(path);
+
+            if (normalizedPath.Equals(path, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!patternMetrics.TryGetValue(normalizedPath, out var patternMetric))
+            {
+                patternMetric = new NPlusOnePatternMetrics(path);
+                patternMetrics[normalizedPath] = patternMetric;
+            }
+
+            patternMetric.Occurrences++;
+
+            if (fieldMetrics.TryGetValue(path, out var metric))
+            {
+                patternMetric.DataLoaderBatchCalls += metric.DataLoaderBatchCalls;
+                patternMetric.DataLoaderCacheHits += metric.DataLoaderCacheHits;
+            }
+        }
+
+        var issues = new List<object?>(patternMetrics.Count);
+
+        foreach (var entry in patternMetrics)
+        {
+            var patternMetric = entry.Value;
+
+            if (patternMetric.Occurrences < threshold)
+            {
+                continue;
+            }
+
+            if (patternMetric.DataLoaderBatchCalls > 0
+                || patternMetric.DataLoaderCacheHits > 0)
+            {
+                continue;
+            }
+
+            issues.Add(new Dictionary<string, object?>
+            {
+                ["pathPattern"] = entry.Key,
+                ["occurrences"] = patternMetric.Occurrences,
+                ["examplePath"] = patternMetric.ExamplePath,
+                ["message"] =
+                    "Potential N+1 pattern detected for repeated list field resolution without DataLoader batching.",
+                ["recommendation"] = "Use DataLoader to batch this field access by parent keys."
+            });
+        }
+
+        return [.. issues];
+    }
+
+    private static string NormalizeIndexedPath(string path)
+    {
+        if (path.Length == 0)
+        {
+            return path;
+        }
+
+        var normalized = new StringBuilder(path.Length);
+
+        for (var i = 0; i < path.Length; i++)
+        {
+            if (path[i] == '[')
+            {
+                normalized.Append("[]");
+                i++;
+
+                while (i < path.Length && path[i] != ']')
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
+            normalized.Append(path[i]);
+        }
+
+        return normalized.ToString();
+    }
+
     private sealed record ExecutionProfileFieldEntry(
         string Path,
         int Depth,
@@ -166,5 +305,21 @@ internal sealed class ExecutionProfileCollector
         public int DataLoaderCacheHits { get; set; }
 
         public int DataLoaderCacheMisses { get; set; }
+    }
+
+    private sealed record ExecutionProfileFieldMetricsSnapshot(
+        int DataLoaderBatchCalls,
+        int DataLoaderCacheHits,
+        int DataLoaderCacheMisses);
+
+    private sealed class NPlusOnePatternMetrics(string examplePath)
+    {
+        public string ExamplePath { get; } = examplePath;
+
+        public int Occurrences { get; set; }
+
+        public int DataLoaderBatchCalls { get; set; }
+
+        public int DataLoaderCacheHits { get; set; }
     }
 }

@@ -92,6 +92,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.False(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.SlowFields, options.DetailLevel);
+        Assert.Equal(3, options.NPlusOneListPatternThreshold);
         Assert.False(state.IsEnabled);
     }
 
@@ -101,6 +102,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var configuration = new ConfigurationManager();
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:Enabled"] = "true";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:DetailLevel"] = "NPlusOneOnly";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:NPlusOneListPatternThreshold"] = "7";
 
         var executor = await CreateExecutorAsync(
             configure: builder => builder.AddExecutionProfiler(configuration));
@@ -110,6 +112,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.NPlusOneOnly, options.DetailLevel);
+        Assert.Equal(7, options.NPlusOneListPatternThreshold);
         Assert.True(state.IsEnabled);
     }
 
@@ -124,6 +127,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                     {
                         options.Enabled = true;
                         options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                        options.NPlusOneListPatternThreshold = 9;
                     }));
 
         var options = executor.GetExecutionProfilerOptions();
@@ -131,6 +135,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.Full, options.DetailLevel);
+        Assert.Equal(9, options.NPlusOneListPatternThreshold);
         Assert.True(state.IsEnabled);
     }
 
@@ -247,6 +252,49 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_AddNPlusOneIssue_When_RepeatedIndexedPathHasNoDataLoaderBatching()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                    options.NPlusOneListPatternThreshold = 3;
+                }));
+
+        var result = (await executor.ExecuteAsync("{ users(count: 4) { profileName } }"))
+            .ExpectOperationResult();
+
+        var profiling = GetProfilingExtension(result);
+        var nPlusOne = GetNPlusOneExtension(profiling);
+        var issue = GetNPlusOneIssue(nPlusOne, "users[].profileName");
+
+        Assert.Equal(1, GetIntValue(nPlusOne, "issueCount"));
+        Assert.Equal(4, GetIntValue(issue, "occurrences"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_NotAddNPlusOneSection_When_DetailLevelIsSlowFields()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.SlowFields;
+                    options.NPlusOneListPatternThreshold = 3;
+                }));
+
+        var result = (await executor.ExecuteAsync("{ users(count: 4) { profileName } }"))
+            .ExpectOperationResult();
+
+        var profiling = GetProfilingExtension(result);
+
+        Assert.False(profiling.ContainsKey("nPlusOne"));
+    }
+
+    [Fact]
     public async Task IsExecutionProfilerEnabled_Should_RespectRuntimeAndRequestOverrides_When_ExecutingRequests()
     {
         var listener = new CaptureProfilerStateListener();
@@ -335,6 +383,18 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
             string key,
             CancellationToken cancellationToken)
             => await dataLoader.LoadAsync(key, cancellationToken);
+
+        public IReadOnlyList<ProfilerUser> Users(int count)
+        {
+            var users = new List<ProfilerUser>(count);
+
+            for (var i = 0; i < count; i++)
+            {
+                users.Add(new ProfilerUser($"User-{i}"));
+            }
+
+            return users;
+        }
     }
 
     public sealed class ProfilerChild
@@ -355,6 +415,11 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     public sealed class PureProfilerNested
     {
         public string PureName() => "PureNested";
+    }
+
+    public sealed class ProfilerUser(string profileName)
+    {
+        public string ProfileName() => profileName;
     }
 
     public sealed class ProfilerDataLoader(
@@ -447,5 +512,33 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     {
         Assert.True(values.TryGetValue(key, out var value));
         return Assert.IsType<int>(value);
+    }
+
+    private static IReadOnlyDictionary<string, object?> GetNPlusOneExtension(
+        IReadOnlyDictionary<string, object?> profiling)
+    {
+        Assert.True(profiling.TryGetValue("nPlusOne", out var nPlusOne));
+        return Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(nPlusOne);
+    }
+
+    private static IReadOnlyDictionary<string, object?> GetNPlusOneIssue(
+        IReadOnlyDictionary<string, object?> nPlusOne,
+        string pathPattern)
+    {
+        Assert.True(nPlusOne.TryGetValue("issues", out var issuesValue));
+        var issues = Assert.IsAssignableFrom<IReadOnlyList<object?>>(issuesValue);
+
+        for (var i = 0; i < issues.Count; i++)
+        {
+            var issue = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(issues[i]);
+            if (issue.TryGetValue("pathPattern", out var pathPatternValue)
+                && pathPatternValue is string actualPathPattern
+                && actualPathPattern.Equals(pathPattern, StringComparison.Ordinal))
+            {
+                return issue;
+            }
+        }
+
+        throw new InvalidOperationException($"N+1 issue for '{pathPattern}' was not found.");
     }
 }

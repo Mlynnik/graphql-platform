@@ -110,6 +110,12 @@ public static class ExecutionProfilerServiceCollectionExtensions
                 {
                     options.DetailLevel = parsedDetailLevel;
                 }
+
+                if (int.TryParse(section["NPlusOneListPatternThreshold"], out var threshold)
+                    && threshold > 0)
+                {
+                    options.NPlusOneListPatternThreshold = threshold;
+                }
             });
     }
 

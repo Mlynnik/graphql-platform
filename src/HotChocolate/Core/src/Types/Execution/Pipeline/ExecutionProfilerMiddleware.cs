@@ -15,6 +15,7 @@ internal sealed class ExecutionProfilerMiddleware
     public async ValueTask InvokeAsync(RequestContext context)
     {
         var isEnabled = context.ResolveExecutionProfilerEnabled();
+        var options = context.GetExecutionProfilerOptions();
 
         // Ensure profiler state can still be resolved even when middleware is bypassed.
         if (!isEnabled)
@@ -41,7 +42,7 @@ internal sealed class ExecutionProfilerMiddleware
                 operationResult.Extensions =
                     operationResult.Extensions.SetItem(
                         ExecutionProfileCollector.ExtensionKey,
-                        profileCollector.CreateResultExtension());
+                        profileCollector.CreateResultExtension(options));
             }
 
             context.Features.Set<ExecutionProfileCollector>(null);

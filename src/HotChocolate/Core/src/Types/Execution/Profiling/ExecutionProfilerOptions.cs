@@ -19,4 +19,9 @@ public sealed class ExecutionProfilerOptions
     /// Gets or sets the profiling detail level.
     /// </summary>
     public ExecutionProfilerDetailLevel DetailLevel { get; set; } = ExecutionProfilerDetailLevel.SlowFields;
+
+    /// <summary>
+    /// Gets or sets the minimum number of indexed path occurrences that triggers N+1 detection.
+    /// </summary>
+    public int NPlusOneListPatternThreshold { get; set; } = 3;
 }
