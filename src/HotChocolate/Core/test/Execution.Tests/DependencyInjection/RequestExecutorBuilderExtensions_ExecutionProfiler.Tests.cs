@@ -1,6 +1,7 @@
 using HotChocolate.Execution.Instrumentation;
 using HotChocolate.Execution.Configuration;
 using HotChocolate.Execution.Profiling;
+using HotChocolate.Resolvers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -146,6 +147,70 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_NotAddProfilingExtension_When_ProfilerIsDisabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler());
+
+        var result = (await executor.ExecuteAsync("{ greeting }")).ExpectOperationResult();
+
+        Assert.False(result.Extensions.ContainsKey("profiling"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_AddProfilingExtension_When_ProfilerIsEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(options => options.Enabled = true));
+
+        var result = (await executor.ExecuteAsync("{ greeting }")).ExpectOperationResult();
+        var profiling = GetProfilingExtension(result);
+
+        Assert.True(profiling.ContainsKey("requestDurationNs"));
+        Assert.True(profiling.ContainsKey("fieldCount"));
+        Assert.True(profiling.ContainsKey("fields"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_RecordSyncResolverTiming_When_ProfilerIsEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(options => options.Enabled = true));
+
+        var result = (await executor.ExecuteAsync("{ greeting }")).ExpectOperationResult();
+        var field = GetFieldProfile(result, "greeting");
+
+        Assert.Equal(1, GetFieldDepth(field));
+        Assert.True(GetFieldDuration(field) >= 0);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_RecordAsyncResolverTiming_When_ProfilerIsEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(options => options.Enabled = true));
+
+        var result = (await executor.ExecuteAsync("{ asyncGreeting }")).ExpectOperationResult();
+        var field = GetFieldProfile(result, "asyncGreeting");
+
+        Assert.Equal(1, GetFieldDepth(field));
+        Assert.True(GetFieldDuration(field) >= 0);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_RecordFieldDepth_When_ResolverPathIsNested()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(options => options.Enabled = true));
+
+        var result = (await executor.ExecuteAsync("{ child { nested { name } } }")).ExpectOperationResult();
+
+        Assert.Equal(1, GetFieldDepth(GetFieldProfile(result, "child")));
+        Assert.Equal(2, GetFieldDepth(GetFieldProfile(result, "child.nested")));
+        Assert.Equal(3, GetFieldDepth(GetFieldProfile(result, "child.nested.name")));
+    }
+
+    [Fact]
     public async Task IsExecutionProfilerEnabled_Should_RespectRuntimeAndRequestOverrides_When_ExecutingRequests()
     {
         var listener = new CaptureProfilerStateListener();
@@ -218,6 +283,24 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     public sealed class ProfilerQuery
     {
         public string Greeting() => "Hello";
+
+        public async Task<string> AsyncGreeting()
+        {
+            await Task.Yield();
+            return "Hello async";
+        }
+
+        public ProfilerChild Child(IResolverContext context) => new();
+    }
+
+    public sealed class ProfilerChild
+    {
+        public ProfilerNested Nested(IResolverContext context) => new();
+    }
+
+    public sealed class ProfilerNested
+    {
+        public string Name(IResolverContext context) => "Nested";
     }
 
     private sealed class CaptureProfilerStateListener : ExecutionDiagnosticEventListener
@@ -229,5 +312,58 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
             CapturedStates.Add(context.IsExecutionProfilerEnabled());
             return EmptyScope;
         }
+    }
+
+    private static IReadOnlyDictionary<string, object?> GetProfilingExtension(OperationResult result)
+    {
+        Assert.True(result.Extensions.TryGetValue("profiling", out var profilingValue));
+        return Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(profilingValue);
+    }
+
+    private static IReadOnlyDictionary<string, object?> GetFieldProfile(
+        OperationResult result,
+        string path)
+    {
+        var fieldProfiles = GetFieldProfiles(result);
+
+        for (var i = 0; i < fieldProfiles.Count; i++)
+        {
+            if (fieldProfiles[i].TryGetValue("path", out var pathValue)
+                && pathValue is string fieldPath
+                && fieldPath.Equals(path, StringComparison.Ordinal))
+            {
+                return fieldProfiles[i];
+            }
+        }
+
+        throw new InvalidOperationException($"Field profile '{path}' was not found.");
+    }
+
+    private static List<IReadOnlyDictionary<string, object?>> GetFieldProfiles(OperationResult result)
+    {
+        var profiling = GetProfilingExtension(result);
+        Assert.True(profiling.TryGetValue("fields", out var fieldsValue));
+
+        var fields = Assert.IsAssignableFrom<IReadOnlyList<object?>>(fieldsValue);
+        var fieldProfiles = new List<IReadOnlyDictionary<string, object?>>(fields.Count);
+
+        for (var i = 0; i < fields.Count; i++)
+        {
+            fieldProfiles.Add(Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(fields[i]));
+        }
+
+        return fieldProfiles;
+    }
+
+    private static int GetFieldDepth(IReadOnlyDictionary<string, object?> fieldProfile)
+    {
+        Assert.True(fieldProfile.TryGetValue("depth", out var depthValue));
+        return Assert.IsType<int>(depthValue);
+    }
+
+    private static long GetFieldDuration(IReadOnlyDictionary<string, object?> fieldProfile)
+    {
+        Assert.True(fieldProfile.TryGetValue("durationNs", out var durationValue));
+        return Assert.IsType<long>(durationValue);
     }
 }

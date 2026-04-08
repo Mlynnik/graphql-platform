@@ -28,6 +28,7 @@ public static partial class RequestExecutorBuilderExtensions
         return builder
             .AddApplicationService<ExecutionProfilerOptions>()
             .AddApplicationService<IExecutionProfilerState>()
+            .AddDiagnosticEventListener<ExecutionProfilerDiagnosticEventListener>()
             .UseRequest(
                 ExecutionProfilerMiddleware.Create(),
                 after: WellKnownRequestMiddleware.InstrumentationMiddleware,

@@ -25,7 +25,27 @@ internal sealed class ExecutionProfilerMiddleware
         }
 
         context.SetExecutionProfilerExecutionState(enabled: true);
-        await _next(context).ConfigureAwait(false);
+        var profileCollector = new ExecutionProfileCollector();
+        context.Features.Set(profileCollector);
+
+        try
+        {
+            await _next(context).ConfigureAwait(false);
+        }
+        finally
+        {
+            profileCollector.CompleteRequest();
+
+            if (context.Result is OperationResult operationResult)
+            {
+                operationResult.Extensions =
+                    operationResult.Extensions.SetItem(
+                        ExecutionProfileCollector.ExtensionKey,
+                        profileCollector.CreateResultExtension());
+            }
+
+            context.Features.Set<ExecutionProfileCollector>(null);
+        }
     }
 
     public static RequestMiddlewareConfiguration Create()
