@@ -13,6 +13,7 @@ internal sealed class ExecutionProfileCollector
 #endif
     private readonly List<ExecutionProfileFieldEntry> _fields = [];
     private readonly Dictionary<string, ExecutionProfileFieldMetrics> _fieldMetrics = [];
+    private readonly Dictionary<string, ExecutionProfileSerializationMetrics> _serializationByType = [];
     private readonly long _requestStartTimestamp = Stopwatch.GetTimestamp();
     private readonly ExecutionProfilerOptions? _options;
     private long _requestDurationNanoseconds;
@@ -133,6 +134,44 @@ internal sealed class ExecutionProfileCollector
         }
     }
 
+    public void AddSerializationByType(
+        Path path,
+        string typeName,
+        long durationNanoseconds)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(typeName);
+
+        if (durationNanoseconds < 0)
+        {
+            durationNanoseconds = 0;
+        }
+
+        var pathValue = path.Print();
+        if (_options is { } options
+            && !options.ShouldProfilePath(pathValue))
+        {
+            return;
+        }
+
+        if (typeName.Length == 0)
+        {
+            typeName = "Unknown";
+        }
+
+        lock (_sync)
+        {
+            var metrics = GetOrCreateSerializationMetrics(typeName);
+            metrics.Count++;
+            metrics.TotalDurationNanoseconds += durationNanoseconds;
+
+            if (durationNanoseconds > metrics.MaxDurationNanoseconds)
+            {
+                metrics.MaxDurationNanoseconds = durationNanoseconds;
+            }
+        }
+    }
+
     public void CompleteRequest()
     {
         Volatile.Write(ref _requestDurationNanoseconds, GetElapsedNanoseconds(_requestStartTimestamp));
@@ -166,6 +205,11 @@ internal sealed class ExecutionProfileCollector
             };
         }
 
+        var serializedSerializationByType = SerializeSerializationByType(
+            snapshot.SerializationByType,
+            out var serializationCount,
+            out var serializationDurationNanoseconds);
+
         var result = new Dictionary<string, object?>
         {
             ["requestDurationNs"] = snapshot.RequestDurationNanoseconds,
@@ -173,6 +217,9 @@ internal sealed class ExecutionProfileCollector
             ["dataLoaderBatchCalls"] = snapshot.DataLoaderBatchCalls,
             ["dataLoaderCacheHits"] = snapshot.DataLoaderCacheHits,
             ["dataLoaderCacheMisses"] = snapshot.DataLoaderCacheMisses,
+            ["serializationCount"] = serializationCount,
+            ["serializationDurationNs"] = serializationDurationNanoseconds,
+            ["serializationByType"] = serializedSerializationByType,
             ["fields"] = serializedFields
         };
 
@@ -249,6 +296,17 @@ internal sealed class ExecutionProfileCollector
         return metrics;
     }
 
+    private ExecutionProfileSerializationMetrics GetOrCreateSerializationMetrics(string typeName)
+    {
+        if (!_serializationByType.TryGetValue(typeName, out var metrics))
+        {
+            metrics = new ExecutionProfileSerializationMetrics();
+            _serializationByType[typeName] = metrics;
+        }
+
+        return metrics;
+    }
+
     private static int GetFieldDepth(Path path)
     {
         var depth = 0;
@@ -274,6 +332,7 @@ internal sealed class ExecutionProfileCollector
     {
         ExecutionProfileFieldEntry[] fields;
         Dictionary<string, ExecutionProfileFieldMetricsSnapshot> fieldMetrics;
+        Dictionary<string, ExecutionProfileSerializationMetricsSnapshot> serializationByType;
         int dataLoaderBatchCalls;
         int dataLoaderCacheHits;
         int dataLoaderCacheMisses;
@@ -294,6 +353,19 @@ internal sealed class ExecutionProfileCollector
                         fieldMetric.Value.DataLoaderCacheMisses);
             }
 
+            serializationByType = new Dictionary<string, ExecutionProfileSerializationMetricsSnapshot>(
+                _serializationByType.Count,
+                StringComparer.Ordinal);
+
+            foreach (var entry in _serializationByType)
+            {
+                serializationByType[entry.Key] =
+                    new ExecutionProfileSerializationMetricsSnapshot(
+                        entry.Value.Count,
+                        entry.Value.TotalDurationNanoseconds,
+                        entry.Value.MaxDurationNanoseconds);
+            }
+
             dataLoaderBatchCalls = _dataLoaderBatchCalls;
             dataLoaderCacheHits = _dataLoaderCacheHits;
             dataLoaderCacheMisses = _dataLoaderCacheMisses;
@@ -308,6 +380,7 @@ internal sealed class ExecutionProfileCollector
         return new CollectorSnapshot(
             fields,
             fieldMetrics,
+            serializationByType,
             requestDuration,
             dataLoaderBatchCalls,
             dataLoaderCacheHits,
@@ -411,6 +484,41 @@ internal sealed class ExecutionProfileCollector
         return [.. issues];
     }
 
+    private static object?[] SerializeSerializationByType(
+        IReadOnlyDictionary<string, ExecutionProfileSerializationMetricsSnapshot> serializationByType,
+        out long serializationCount,
+        out long serializationDurationNanoseconds)
+    {
+        var entries = serializationByType
+            .OrderBy(static t => t.Key, StringComparer.Ordinal)
+            .ToArray();
+        var serialized = new object?[entries.Length];
+
+        serializationCount = 0;
+        serializationDurationNanoseconds = 0;
+
+        for (var i = 0; i < entries.Length; i++)
+        {
+            var metrics = entries[i].Value;
+            serializationCount += metrics.Count;
+            serializationDurationNanoseconds += metrics.TotalDurationNanoseconds;
+
+            serialized[i] = new Dictionary<string, object?>
+            {
+                ["typeName"] = entries[i].Key,
+                ["count"] = metrics.Count,
+                ["totalDurationNs"] = metrics.TotalDurationNanoseconds,
+                ["avgDurationNs"] =
+                    metrics.Count > 0
+                        ? metrics.TotalDurationNanoseconds / (double)metrics.Count
+                        : 0d,
+                ["maxDurationNs"] = metrics.MaxDurationNanoseconds
+            };
+        }
+
+        return serialized;
+    }
+
     private static string NormalizeIndexedPath(string path)
     {
         if (path.Length == 0)
@@ -458,10 +566,24 @@ internal sealed class ExecutionProfileCollector
         public int DataLoaderCacheMisses { get; set; }
     }
 
+    private sealed class ExecutionProfileSerializationMetrics
+    {
+        public int Count { get; set; }
+
+        public long TotalDurationNanoseconds { get; set; }
+
+        public long MaxDurationNanoseconds { get; set; }
+    }
+
     private sealed record ExecutionProfileFieldMetricsSnapshot(
         int DataLoaderBatchCalls,
         int DataLoaderCacheHits,
         int DataLoaderCacheMisses);
+
+    private sealed record ExecutionProfileSerializationMetricsSnapshot(
+        int Count,
+        long TotalDurationNanoseconds,
+        long MaxDurationNanoseconds);
 
     private sealed class NPlusOnePatternMetrics(string examplePath)
     {
@@ -477,6 +599,7 @@ internal sealed class ExecutionProfileCollector
     private sealed record CollectorSnapshot(
         ExecutionProfileFieldEntry[] Fields,
         Dictionary<string, ExecutionProfileFieldMetricsSnapshot> FieldMetrics,
+        Dictionary<string, ExecutionProfileSerializationMetricsSnapshot> SerializationByType,
         long RequestDurationNanoseconds,
         int DataLoaderBatchCalls,
         int DataLoaderCacheHits,

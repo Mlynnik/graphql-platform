@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using HotChocolate.Execution.Profiling;
 using HotChocolate.Text.Json;
 using HotChocolate.Types;
 using HotChocolate.Utilities;
@@ -27,7 +29,28 @@ internal static partial class ValueCompletion
                 runtimeValue = c;
             }
 
-            type.CoerceOutputValue(runtimeValue, resultValue);
+            if (operationContext.RequestContext.Features.TryGet<ExecutionProfileCollector>(out var collector)
+                && collector is not null)
+            {
+                var serializationStartTimestamp = Stopwatch.GetTimestamp();
+
+                try
+                {
+                    type.CoerceOutputValue(runtimeValue, resultValue);
+                }
+                finally
+                {
+                    collector.AddSerializationByType(
+                        resultValue.Path,
+                        type.Name,
+                        Stopwatch.GetElapsedTime(serializationStartTimestamp).Ticks * 100);
+                }
+            }
+            else
+            {
+                type.CoerceOutputValue(runtimeValue, resultValue);
+            }
+
             return;
         }
         catch (LeafCoercionException ex)

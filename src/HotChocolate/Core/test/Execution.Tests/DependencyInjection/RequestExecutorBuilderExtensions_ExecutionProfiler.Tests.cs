@@ -280,6 +280,24 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_RecordSerializationMetricsByType_When_ProfilerIsEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(options => options.Enabled = true));
+
+        var result = (await executor.ExecuteAsync("{ greeting child { nested { name } } }"))
+            .ExpectOperationResult();
+        var profiling = GetProfilingExtension(result);
+        var serializationByType = GetAggregateEntries(profiling, "serializationByType");
+        var stringMetrics = GetAggregateEntry(serializationByType, "typeName", "String");
+
+        Assert.True(GetLongValue(profiling, "serializationCount") >= 2);
+        Assert.True(GetLongValue(profiling, "serializationDurationNs") >= 0);
+        Assert.True(GetIntValue(stringMetrics, "count") >= 2);
+        Assert.True(GetLongValue(stringMetrics, "totalDurationNs") >= 0);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_Should_ProfileOnlyConfiguredOperationType_When_OperationTypeFilterIsSet()
     {
         var executor = await CreateExecutorAsync(
