@@ -25,19 +25,28 @@ internal sealed class ExecutionProfilerDiagnosticEventListener
     {
         private readonly ExecutionProfileCollector _collector;
         private readonly Path _path;
+        private readonly IDisposable _pathScope;
         private readonly long _startTimestamp = Stopwatch.GetTimestamp();
 
         public ResolveFieldScope(ExecutionProfileCollector collector, Path path)
         {
             _collector = collector;
             _path = path;
+            _pathScope = ExecutionProfilerScopeContext.Enter(path);
         }
 
         public void Dispose()
         {
-            _collector.AddField(
-                _path,
-                Stopwatch.GetElapsedTime(_startTimestamp).Ticks * 100);
+            try
+            {
+                _collector.AddField(
+                    _path,
+                    Stopwatch.GetElapsedTime(_startTimestamp).Ticks * 100);
+            }
+            finally
+            {
+                _pathScope.Dispose();
+            }
         }
     }
 }

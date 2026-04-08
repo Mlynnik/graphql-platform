@@ -1,3 +1,5 @@
+using GreenDonut;
+using GreenDonut.DependencyInjection;
 using HotChocolate.Execution.Instrumentation;
 using HotChocolate.Execution.Configuration;
 using HotChocolate.Execution.Profiling;
@@ -225,6 +227,26 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_RecordDataLoaderAndCacheMetrics_When_ProfilerIsEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder
+                .AddExecutionProfiler(options => options.Enabled = true)
+                .AddDataLoader<ProfilerDataLoader>());
+
+        var result = (await executor.ExecuteAsync("{ a: load(key: \"a\") b: load(key: \"a\") c: load(key: \"b\") }"))
+            .ExpectOperationResult();
+
+        var profiling = GetProfilingExtension(result);
+        Assert.Equal(1, GetIntValue(profiling, "dataLoaderBatchCalls"));
+        Assert.Equal(1, GetIntValue(profiling, "dataLoaderCacheHits"));
+        Assert.Equal(2, GetIntValue(profiling, "dataLoaderCacheMisses"));
+
+        var bField = GetFieldProfile(result, "b");
+        Assert.Equal(1, GetIntValue(bField, "dataLoaderCacheHits"));
+    }
+
+    [Fact]
     public async Task IsExecutionProfilerEnabled_Should_RespectRuntimeAndRequestOverrides_When_ExecutingRequests()
     {
         var listener = new CaptureProfilerStateListener();
@@ -307,6 +329,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         public ProfilerChild Child(IResolverContext context) => new();
 
         public PureProfilerChild PureChild() => new();
+
+        public async Task<string?> Load(
+            ProfilerDataLoader dataLoader,
+            string key,
+            CancellationToken cancellationToken)
+            => await dataLoader.LoadAsync(key, cancellationToken);
     }
 
     public sealed class ProfilerChild
@@ -327,6 +355,26 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     public sealed class PureProfilerNested
     {
         public string PureName() => "PureNested";
+    }
+
+    public sealed class ProfilerDataLoader(
+        IBatchScheduler batchScheduler,
+        DataLoaderOptions options)
+        : BatchDataLoader<string, string>(batchScheduler, options)
+    {
+        protected override Task<IReadOnlyDictionary<string, string>> LoadBatchAsync(
+            IReadOnlyList<string> keys,
+            CancellationToken cancellationToken)
+        {
+            var values = new Dictionary<string, string>(keys.Count);
+
+            for (var i = 0; i < keys.Count; i++)
+            {
+                values[keys[i]] = keys[i];
+            }
+
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(values);
+        }
     }
 
     private sealed class CaptureProfilerStateListener : ExecutionDiagnosticEventListener
@@ -391,5 +439,13 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     {
         Assert.True(fieldProfile.TryGetValue("durationNs", out var durationValue));
         return Assert.IsType<long>(durationValue);
+    }
+
+    private static int GetIntValue(
+        IReadOnlyDictionary<string, object?> values,
+        string key)
+    {
+        Assert.True(values.TryGetValue(key, out var value));
+        return Assert.IsType<int>(value);
     }
 }

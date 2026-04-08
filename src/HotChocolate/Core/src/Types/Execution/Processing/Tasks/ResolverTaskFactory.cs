@@ -300,6 +300,9 @@ internal static class ResolverTaskFactory
         var hasProfileCollector =
             resolverContext.Features.TryGet<ExecutionProfileCollector>(out var profileCollector);
         var startTimestamp = hasProfileCollector ? Stopwatch.GetTimestamp() : 0;
+        using var profileScope = hasProfileCollector
+            ? ExecutionProfilerScopeContext.Enter(fieldValue.Path)
+            : null;
         var executedSuccessfully = false;
         object? resolverResult = null;
 
