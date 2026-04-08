@@ -20,6 +20,9 @@ public static class WellKnownRequestMiddleware
     /// <summary>Gets the key for the InstrumentationMiddleware.</summary>
     public const string InstrumentationMiddleware = "InstrumentationMiddleware";
 
+    /// <summary>Gets the key for the ExecutionProfilerMiddleware.</summary>
+    public const string ExecutionProfilerMiddleware = "ExecutionProfilerMiddleware";
+
     /// <summary>Gets the key for the SkipWarmupExecutionMiddleware.</summary>
     public const string SkipWarmupExecutionMiddleware = "SkipWarmupExecutionMiddleware";
 
