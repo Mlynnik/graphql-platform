@@ -114,6 +114,18 @@ public static class ExecutionProfilerServiceCollectionExtensions
                     options.DetailLevel = parsedDetailLevel;
                 }
 
+                var slowFieldThreshold = section["SlowFieldThreshold"];
+                if (TimeSpan.TryParse(slowFieldThreshold, out var parsedSlowFieldThreshold)
+                    && parsedSlowFieldThreshold >= TimeSpan.Zero)
+                {
+                    options.SlowFieldThreshold = parsedSlowFieldThreshold;
+                }
+                else if (int.TryParse(slowFieldThreshold, out var slowFieldThresholdMs)
+                    && slowFieldThresholdMs >= 0)
+                {
+                    options.SlowFieldThreshold = TimeSpan.FromMilliseconds(slowFieldThresholdMs);
+                }
+
                 AddStringSetValues(section, "IncludedOperationTypes", options.IncludedOperationTypes);
                 AddStringSetValues(section, "IncludedOperationNames", options.IncludedOperationNames);
                 AddStringSetValues(section, "IncludedPathPrefixes", options.IncludedPathPrefixes);

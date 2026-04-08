@@ -184,48 +184,52 @@ internal sealed class ExecutionProfileCollector
         ArgumentNullException.ThrowIfNull(options);
 
         var snapshot = CaptureSnapshot();
-
-        var serializedFields = new object?[snapshot.Fields.Length];
-
-        for (var i = 0; i < snapshot.Fields.Length; i++)
-        {
-            var field = snapshot.Fields[i];
-            snapshot.FieldMetrics.TryGetValue(field.Path, out var fieldMetric);
-            serializedFields[i] = new Dictionary<string, object?>
-            {
-                ["path"] = field.Path,
-                ["depth"] = field.Depth,
-                ["durationNs"] = field.DurationNanoseconds,
-                ["coordinate"] = field.Coordinate,
-                ["objectType"] = field.ObjectType,
-                ["fieldName"] = field.FieldName,
-                ["dataLoaderBatchCalls"] = fieldMetric?.DataLoaderBatchCalls ?? 0,
-                ["dataLoaderCacheHits"] = fieldMetric?.DataLoaderCacheHits ?? 0,
-                ["dataLoaderCacheMisses"] = fieldMetric?.DataLoaderCacheMisses ?? 0
-            };
-        }
-
-        var serializedSerializationByType = SerializeSerializationByType(
-            snapshot.SerializationByType,
-            out var serializationCount,
-            out var serializationDurationNanoseconds);
-
         var result = new Dictionary<string, object?>
         {
-            ["requestDurationNs"] = snapshot.RequestDurationNanoseconds,
-            ["fieldCount"] = snapshot.Fields.Length,
-            ["dataLoaderBatchCalls"] = snapshot.DataLoaderBatchCalls,
-            ["dataLoaderCacheHits"] = snapshot.DataLoaderCacheHits,
-            ["dataLoaderCacheMisses"] = snapshot.DataLoaderCacheMisses,
-            ["serializationCount"] = serializationCount,
-            ["serializationDurationNs"] = serializationDurationNanoseconds,
-            ["serializationByType"] = serializedSerializationByType,
-            ["fields"] = serializedFields
+            ["requestDurationNs"] = snapshot.RequestDurationNanoseconds
         };
 
         if (aggregates is { Count: > 0 })
         {
             result["aggregates"] = aggregates;
+        }
+
+        if (options.DetailLevel is not ExecutionProfilerDetailLevel.NPlusOneOnly)
+        {
+            var fields = FilterFieldsForDetailLevel(snapshot.Fields, options);
+            var serializedFields = new object?[fields.Length];
+
+            for (var i = 0; i < fields.Length; i++)
+            {
+                var field = fields[i];
+                snapshot.FieldMetrics.TryGetValue(field.Path, out var fieldMetric);
+                serializedFields[i] = new Dictionary<string, object?>
+                {
+                    ["path"] = field.Path,
+                    ["depth"] = field.Depth,
+                    ["durationNs"] = field.DurationNanoseconds,
+                    ["coordinate"] = field.Coordinate,
+                    ["objectType"] = field.ObjectType,
+                    ["fieldName"] = field.FieldName,
+                    ["dataLoaderBatchCalls"] = fieldMetric?.DataLoaderBatchCalls ?? 0,
+                    ["dataLoaderCacheHits"] = fieldMetric?.DataLoaderCacheHits ?? 0,
+                    ["dataLoaderCacheMisses"] = fieldMetric?.DataLoaderCacheMisses ?? 0
+                };
+            }
+
+            var serializedSerializationByType = SerializeSerializationByType(
+                snapshot.SerializationByType,
+                out var serializationCount,
+                out var serializationDurationNanoseconds);
+
+            result["fieldCount"] = fields.Length;
+            result["dataLoaderBatchCalls"] = snapshot.DataLoaderBatchCalls;
+            result["dataLoaderCacheHits"] = snapshot.DataLoaderCacheHits;
+            result["dataLoaderCacheMisses"] = snapshot.DataLoaderCacheMisses;
+            result["serializationCount"] = serializationCount;
+            result["serializationDurationNs"] = serializationDurationNanoseconds;
+            result["serializationByType"] = serializedSerializationByType;
+            result["fields"] = serializedFields;
         }
 
         if (options.DetailLevel is ExecutionProfilerDetailLevel.Full
@@ -244,6 +248,34 @@ internal sealed class ExecutionProfileCollector
         }
 
         return result;
+    }
+
+    private static ExecutionProfileFieldEntry[] FilterFieldsForDetailLevel(
+        ExecutionProfileFieldEntry[] fields,
+        ExecutionProfilerOptions options)
+    {
+        if (options.DetailLevel is not ExecutionProfilerDetailLevel.SlowFields)
+        {
+            return fields;
+        }
+
+        var slowFieldThresholdNanoseconds = GetDurationNanoseconds(options.SlowFieldThreshold);
+        if (slowFieldThresholdNanoseconds <= 0)
+        {
+            return fields;
+        }
+
+        var filtered = new List<ExecutionProfileFieldEntry>(fields.Length);
+
+        for (var i = 0; i < fields.Length; i++)
+        {
+            if (fields[i].DurationNanoseconds >= slowFieldThresholdNanoseconds)
+            {
+                filtered.Add(fields[i]);
+            }
+        }
+
+        return [.. filtered];
     }
 
     public ExecutionProfilerRequestSample CreateRequestSample(
@@ -327,6 +359,23 @@ internal sealed class ExecutionProfileCollector
 
     private static long GetElapsedNanoseconds(long startTimestamp)
         => Stopwatch.GetElapsedTime(startTimestamp).Ticks * 100;
+
+    private static long GetDurationNanoseconds(TimeSpan duration)
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            return 0;
+        }
+
+        const long nanosecondsPerTick = 100;
+        var ticks = duration.Ticks;
+        if (ticks >= long.MaxValue / nanosecondsPerTick)
+        {
+            return long.MaxValue;
+        }
+
+        return ticks * nanosecondsPerTick;
+    }
 
     private CollectorSnapshot CaptureSnapshot()
     {

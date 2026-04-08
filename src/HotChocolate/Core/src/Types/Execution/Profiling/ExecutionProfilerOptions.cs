@@ -21,6 +21,12 @@ public sealed class ExecutionProfilerOptions
     public ExecutionProfilerDetailLevel DetailLevel { get; set; } = ExecutionProfilerDetailLevel.SlowFields;
 
     /// <summary>
+    /// Gets or sets the minimum field execution duration that is emitted when
+    /// <see cref="DetailLevel"/> is <see cref="ExecutionProfilerDetailLevel.SlowFields"/>.
+    /// </summary>
+    public TimeSpan SlowFieldThreshold { get; set; } = TimeSpan.Zero;
+
+    /// <summary>
     /// Gets operation types to include in profiling. Empty set means all operation types.
     /// </summary>
     public ISet<string> IncludedOperationTypes { get; } =

@@ -94,6 +94,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.False(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.SlowFields, options.DetailLevel);
+        Assert.Equal(TimeSpan.Zero, options.SlowFieldThreshold);
         Assert.Empty(options.IncludedOperationTypes);
         Assert.Empty(options.IncludedOperationNames);
         Assert.Empty(options.IncludedPathPrefixes);
@@ -118,6 +119,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var configuration = new ConfigurationManager();
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:Enabled"] = "true";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:DetailLevel"] = "NPlusOneOnly";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowFieldThreshold"] = "00:00:00.050";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationTypes:0"] = "mutation";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationNames:0"] = "NamedMutation";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedPathPrefixes:0"] = "child.nested";
@@ -142,6 +144,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.NPlusOneOnly, options.DetailLevel);
+        Assert.Equal(TimeSpan.FromMilliseconds(50), options.SlowFieldThreshold);
         Assert.Contains("mutation", options.IncludedOperationTypes);
         Assert.Contains("NamedMutation", options.IncludedOperationNames);
         Assert.Contains("child.nested", options.IncludedPathPrefixes);
@@ -171,6 +174,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                     {
                         options.Enabled = true;
                         options.DetailLevel = ExecutionProfilerDetailLevel.Full;
+                        options.SlowFieldThreshold = TimeSpan.FromMilliseconds(25);
                         options.IncludedOperationTypes.Add("query");
                         options.IncludedOperationNames.Add("NamedQuery");
                         options.IncludedPathPrefixes.Add("pureChild.pureNested");
@@ -193,6 +197,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.Full, options.DetailLevel);
+        Assert.Equal(TimeSpan.FromMilliseconds(25), options.SlowFieldThreshold);
         Assert.Contains("query", options.IncludedOperationTypes);
         Assert.Contains("NamedQuery", options.IncludedOperationNames);
         Assert.Contains("pureChild.pureNested", options.IncludedPathPrefixes);
@@ -498,6 +503,51 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var profiling = GetProfilingExtension(result);
 
         Assert.False(profiling.ContainsKey("nPlusOne"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_IncludeOnlyNPlusOnePayload_When_DetailLevelIsNPlusOneOnly()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.NPlusOneOnly;
+                    options.NPlusOneListPatternThreshold = 3;
+                }));
+
+        var result = (await executor.ExecuteAsync("{ users(count: 4) { profileName } }"))
+            .ExpectOperationResult();
+        var profiling = GetProfilingExtension(result);
+
+        Assert.True(profiling.ContainsKey("requestDurationNs"));
+        Assert.True(profiling.ContainsKey("nPlusOne"));
+        Assert.False(profiling.ContainsKey("fields"));
+        Assert.False(profiling.ContainsKey("fieldCount"));
+        Assert.False(profiling.ContainsKey("serializationByType"));
+        Assert.False(profiling.ContainsKey("serializationCount"));
+        Assert.False(profiling.ContainsKey("dataLoaderBatchCalls"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_IncludeOnlySlowFields_When_DetailLevelIsSlowFields()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.DetailLevel = ExecutionProfilerDetailLevel.SlowFields;
+                    options.SlowFieldThreshold = TimeSpan.FromMilliseconds(10);
+                }));
+
+        var result = (await executor.ExecuteAsync("{ greeting slowGreeting }"))
+            .ExpectOperationResult();
+        var paths = GetFieldPaths(result);
+
+        Assert.Contains("slowGreeting", paths);
+        Assert.DoesNotContain("greeting", paths);
     }
 
     [Fact]
@@ -906,6 +956,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var configuration = new ConfigurationManager();
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:Enabled"] = "true";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:DetailLevel"] = "Full";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlowFieldThreshold"] = "00:00:00.015";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationTypes:0"] = "query";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedOperationNames:0"] = "ConfiguredQuery";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:IncludedPathPrefixes:0"] = "child.nested";
@@ -930,6 +981,7 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
 
         Assert.True(options.Enabled);
         Assert.Equal(ExecutionProfilerDetailLevel.Full, options.DetailLevel);
+        Assert.Equal(TimeSpan.FromMilliseconds(15), options.SlowFieldThreshold);
         Assert.Contains("query", options.IncludedOperationTypes);
         Assert.Contains("ConfiguredQuery", options.IncludedOperationNames);
         Assert.Contains("child.nested", options.IncludedPathPrefixes);
@@ -985,6 +1037,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         {
             await Task.Yield();
             return "Hello async";
+        }
+
+        public async Task<string> SlowGreeting()
+        {
+            await Task.Delay(20);
+            return "Slow greeting";
         }
 
         public ProfilerChild Child(IResolverContext context) => new();
