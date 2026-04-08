@@ -1,5 +1,6 @@
 using GreenDonut;
 using GreenDonut.DependencyInjection;
+using System.Diagnostics.Metrics;
 using HotChocolate.Execution.Instrumentation;
 using HotChocolate.Execution.Configuration;
 using HotChocolate.Execution.Profiling;
@@ -96,6 +97,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.True(options.AggregationEnabled);
         Assert.Equal(200, options.SlidingWindowMaxRequests);
         Assert.Equal(TimeSpan.FromMinutes(5), options.SlidingWindowDuration);
+        Assert.True(options.OpenTelemetryEnabled);
+        Assert.False(options.OpenTelemetryIncludeOperationName);
         Assert.False(state.IsEnabled);
     }
 
@@ -109,6 +112,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:AggregationEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowMaxRequests"] = "25";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:02:00";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryEnabled"] = "false";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryIncludeOperationName"] = "true";
 
         var executor = await CreateExecutorAsync(
             configure: builder => builder.AddExecutionProfiler(configuration));
@@ -122,6 +127,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.False(options.AggregationEnabled);
         Assert.Equal(25, options.SlidingWindowMaxRequests);
         Assert.Equal(TimeSpan.FromMinutes(2), options.SlidingWindowDuration);
+        Assert.False(options.OpenTelemetryEnabled);
+        Assert.True(options.OpenTelemetryIncludeOperationName);
         Assert.True(state.IsEnabled);
     }
 
@@ -140,6 +147,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                         options.AggregationEnabled = false;
                         options.SlidingWindowMaxRequests = 42;
                         options.SlidingWindowDuration = TimeSpan.FromSeconds(45);
+                        options.OpenTelemetryEnabled = false;
+                        options.OpenTelemetryIncludeOperationName = true;
                     }));
 
         var options = executor.GetExecutionProfilerOptions();
@@ -151,6 +160,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.False(options.AggregationEnabled);
         Assert.Equal(42, options.SlidingWindowMaxRequests);
         Assert.Equal(TimeSpan.FromSeconds(45), options.SlidingWindowDuration);
+        Assert.False(options.OpenTelemetryEnabled);
+        Assert.True(options.OpenTelemetryIncludeOperationName);
         Assert.True(state.IsEnabled);
     }
 
@@ -310,6 +321,110 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_Should_EmitOpenTelemetryMetrics_When_ProfilerMetricsEnabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.OpenTelemetryEnabled = true;
+                    options.OpenTelemetryIncludeOperationName = true;
+                }));
+
+        long requestCount = 0;
+        long fieldExecutionCount = 0;
+        var requestDurations = new List<double>();
+        string? capturedOperationName = null;
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, currentListener) =>
+        {
+            if (instrument.Meter.Name.Equals(
+                    ExecutionProfilerTelemetry.MeterName,
+                    StringComparison.Ordinal))
+            {
+                currentListener.EnableMeasurementEvents(instrument);
+            }
+        };
+
+        listener.SetMeasurementEventCallback<long>(
+            (instrument, measurement, tags, _) =>
+            {
+                if (instrument.Name.Equals("graphql.execution.profiler.requests", StringComparison.Ordinal))
+                {
+                    requestCount += measurement;
+                }
+                else if (instrument.Name.Equals("graphql.execution.profiler.field.executions", StringComparison.Ordinal))
+                {
+                    fieldExecutionCount += measurement;
+                }
+
+                capturedOperationName ??= GetTagValue(tags, "graphql.operation.name");
+            });
+
+        listener.SetMeasurementEventCallback<double>(
+            (instrument, measurement, tags, _) =>
+            {
+                if (instrument.Name.Equals("graphql.execution.profiler.request.duration", StringComparison.Ordinal))
+                {
+                    requestDurations.Add(measurement);
+                }
+
+                capturedOperationName ??= GetTagValue(tags, "graphql.operation.name");
+            });
+
+        listener.Start();
+
+        await executor.ExecuteAsync("query NamedRequest { greeting }");
+
+        Assert.True(requestCount >= 1);
+        Assert.True(fieldExecutionCount >= 1);
+        Assert.NotEmpty(requestDurations);
+        Assert.Equal("NamedRequest", capturedOperationName);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_Should_NotEmitOpenTelemetryMetrics_When_ProfilerMetricsDisabled()
+    {
+        var executor = await CreateExecutorAsync(
+            configure: builder => builder.AddExecutionProfiler(
+                options =>
+                {
+                    options.Enabled = true;
+                    options.OpenTelemetryEnabled = false;
+                }));
+
+        long requestCount = 0;
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, currentListener) =>
+        {
+            if (instrument.Meter.Name.Equals(
+                    ExecutionProfilerTelemetry.MeterName,
+                    StringComparison.Ordinal))
+            {
+                currentListener.EnableMeasurementEvents(instrument);
+            }
+        };
+
+        listener.SetMeasurementEventCallback<long>(
+            (instrument, measurement, _, _) =>
+            {
+                if (instrument.Name.Equals("graphql.execution.profiler.requests", StringComparison.Ordinal))
+                {
+                    requestCount += measurement;
+                }
+            });
+
+        listener.Start();
+
+        await executor.ExecuteAsync("{ greeting }");
+
+        Assert.Equal(0, requestCount);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_Should_AddAggregateStatisticsGroupedByOperationType_When_AggregationEnabled()
     {
         var executor = await CreateExecutorAsync(
@@ -386,6 +501,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                     "query",
                     "PercentileProbe",
                     duration,
+                    0,
+                    0,
+                    0,
                     [
                         new ExecutionProfilerFieldSample(
                             "Query.greeting",
@@ -426,6 +544,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                 "query",
                 "Expired",
                 5,
+                0,
+                0,
+                0,
                 [
                     new ExecutionProfilerFieldSample(
                         "Query.expired",
@@ -440,6 +561,9 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
                 "query",
                 "Current",
                 10,
+                0,
+                0,
+                0,
                 [
                     new ExecutionProfilerFieldSample(
                         "Query.current",
@@ -492,10 +616,12 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         var options = serviceProvider.GetRequiredService<ExecutionProfilerOptions>();
         var state = serviceProvider.GetRequiredService<IExecutionProfilerState>();
         var aggregationStore = serviceProvider.GetRequiredService<IExecutionProfilerAggregationStore>();
+        var metricsExporter = serviceProvider.GetRequiredService<IExecutionProfilerMetricsExporter>();
 
         Assert.False(options.Enabled);
         Assert.False(state.IsEnabled);
         Assert.NotNull(aggregationStore);
+        Assert.NotNull(metricsExporter);
     }
 
     [Fact]
@@ -507,6 +633,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:AggregationEnabled"] = "false";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowMaxRequests"] = "12";
         configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:SlidingWindowDuration"] = "00:00:30";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryEnabled"] = "false";
+        configuration[$"{ExecutionProfilerOptions.DefaultConfigurationSectionPath}:OpenTelemetryIncludeOperationName"] = "true";
 
         var services = new ServiceCollection();
         services.ConfigureExecutionProfiler(configuration);
@@ -520,6 +648,8 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
         Assert.False(options.AggregationEnabled);
         Assert.Equal(12, options.SlidingWindowMaxRequests);
         Assert.Equal(TimeSpan.FromSeconds(30), options.SlidingWindowDuration);
+        Assert.False(options.OpenTelemetryEnabled);
+        Assert.True(options.OpenTelemetryIncludeOperationName);
         Assert.True(state.IsEnabled);
     }
 
@@ -754,6 +884,22 @@ public class RequestExecutorBuilderExtensionsExecutionProfilerTests
     {
         Assert.True(values.TryGetValue(key, out var value));
         return Assert.IsType<double>(value);
+    }
+
+    private static string? GetTagValue(
+        ReadOnlySpan<KeyValuePair<string, object?>> tags,
+        string key)
+    {
+        for (var i = 0; i < tags.Length; i++)
+        {
+            if (tags[i].Key.Equals(key, StringComparison.Ordinal)
+                && tags[i].Value is string value)
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private static IReadOnlyDictionary<string, object?> GetNPlusOneExtension(

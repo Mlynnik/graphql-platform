@@ -5,6 +5,9 @@ internal sealed record ExecutionProfilerRequestSample(
     string OperationType,
     string? OperationName,
     long RequestDurationNanoseconds,
+    long DataLoaderBatchCalls,
+    long DataLoaderCacheHits,
+    long DataLoaderCacheMisses,
     IReadOnlyList<ExecutionProfilerFieldSample> Fields);
 
 internal sealed record ExecutionProfilerFieldSample(

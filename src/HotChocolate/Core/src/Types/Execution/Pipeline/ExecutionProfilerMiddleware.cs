@@ -17,6 +17,7 @@ internal sealed class ExecutionProfilerMiddleware
         var isEnabled = context.ResolveExecutionProfilerEnabled();
         var options = context.GetExecutionProfilerOptions();
         var aggregationStore = context.Schema.Services.GetRequiredService<IExecutionProfilerAggregationStore>();
+        var metricsExporter = context.Schema.Services.GetRequiredService<IExecutionProfilerMetricsExporter>();
 
         // Ensure profiler state can still be resolved even when middleware is bypassed.
         if (!isEnabled)
@@ -40,22 +41,25 @@ internal sealed class ExecutionProfilerMiddleware
 
             if (context.Result is OperationResult operationResult)
             {
+                var operationType = GetOperationType(context);
+                var operationName = GetOperationName(context);
+                var requestSample = profileCollector.CreateRequestSample(operationType, operationName);
+
                 IReadOnlyDictionary<string, object?>? aggregates = null;
 
                 if (options.AggregationEnabled)
                 {
-                    var operationType = GetOperationType(context);
-                    var operationName = GetOperationName(context);
-                    var requestSample = profileCollector.CreateRequestSample(operationType, operationName);
-
                     aggregationStore.Add(requestSample);
                     aggregates = aggregationStore.CreateSnapshot();
                 }
 
+                var profilingExtension = profileCollector.CreateResultExtension(options, aggregates);
+                metricsExporter.Publish(requestSample, profilingExtension);
+
                 operationResult.Extensions =
                     operationResult.Extensions.SetItem(
                         ExecutionProfileCollector.ExtensionKey,
-                        profileCollector.CreateResultExtension(options, aggregates));
+                        profilingExtension);
             }
 
             context.Features.Set<ExecutionProfileCollector>(null);
@@ -70,6 +74,7 @@ internal sealed class ExecutionProfilerMiddleware
                 _ = core.SchemaServices.GetRequiredService<IExecutionProfilerState>();
                 _ = core.SchemaServices.GetRequiredService<ExecutionProfilerOptions>();
                 _ = core.SchemaServices.GetRequiredService<IExecutionProfilerAggregationStore>();
+                _ = core.SchemaServices.GetRequiredService<IExecutionProfilerMetricsExporter>();
 
                 var middleware = new ExecutionProfilerMiddleware(next);
                 return context => middleware.InvokeAsync(context);

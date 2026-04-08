@@ -203,6 +203,9 @@ internal sealed class ExecutionProfileCollector
             operationType,
             operationName,
             snapshot.RequestDurationNanoseconds,
+            snapshot.DataLoaderBatchCalls,
+            snapshot.DataLoaderCacheHits,
+            snapshot.DataLoaderCacheMisses,
             fields);
     }
 
@@ -285,10 +288,16 @@ internal sealed class ExecutionProfileCollector
     private RequestSampleSnapshot CaptureRequestSampleSnapshot()
     {
         ExecutionProfileFieldEntry[] fields;
+        int dataLoaderBatchCalls;
+        int dataLoaderCacheHits;
+        int dataLoaderCacheMisses;
 
         lock (_sync)
         {
             fields = [.. _fields];
+            dataLoaderBatchCalls = _dataLoaderBatchCalls;
+            dataLoaderCacheHits = _dataLoaderCacheHits;
+            dataLoaderCacheMisses = _dataLoaderCacheMisses;
         }
 
         var requestDuration = Volatile.Read(ref _requestDurationNanoseconds);
@@ -297,7 +306,12 @@ internal sealed class ExecutionProfileCollector
             requestDuration = GetElapsedNanoseconds(_requestStartTimestamp);
         }
 
-        return new RequestSampleSnapshot(fields, requestDuration);
+        return new RequestSampleSnapshot(
+            fields,
+            requestDuration,
+            dataLoaderBatchCalls,
+            dataLoaderCacheHits,
+            dataLoaderCacheMisses);
     }
 
     private static object?[] AnalyzeNPlusOneIssues(
@@ -441,5 +455,8 @@ internal sealed class ExecutionProfileCollector
 
     private sealed record RequestSampleSnapshot(
         ExecutionProfileFieldEntry[] Fields,
-        long RequestDurationNanoseconds);
+        long RequestDurationNanoseconds,
+        int DataLoaderBatchCalls,
+        int DataLoaderCacheHits,
+        int DataLoaderCacheMisses);
 }

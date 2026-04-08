@@ -39,4 +39,14 @@ public sealed class ExecutionProfilerOptions
     /// Gets or sets the time span retained in the aggregation window.
     /// </summary>
     public TimeSpan SlidingWindowDuration { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Gets or sets a value indicating whether profiler metrics should be emitted via OpenTelemetry meters.
+    /// </summary>
+    public bool OpenTelemetryEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether operation names should be included in OpenTelemetry metric tags.
+    /// </summary>
+    public bool OpenTelemetryIncludeOperationName { get; set; }
 }

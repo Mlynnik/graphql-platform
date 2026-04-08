@@ -43,6 +43,7 @@ public static class ExecutionProfilerServiceCollectionExtensions
             });
 
         services.TryAddSingleton<IExecutionProfilerAggregationStore, ExecutionProfilerSlidingWindowAggregator>();
+        services.TryAddSingleton<IExecutionProfilerMetricsExporter, ExecutionProfilerOpenTelemetryExporter>();
 
         return services;
     }
@@ -122,6 +123,16 @@ public static class ExecutionProfilerServiceCollectionExtensions
                 if (bool.TryParse(section["AggregationEnabled"], out var aggregationEnabled))
                 {
                     options.AggregationEnabled = aggregationEnabled;
+                }
+
+                if (bool.TryParse(section["OpenTelemetryEnabled"], out var openTelemetryEnabled))
+                {
+                    options.OpenTelemetryEnabled = openTelemetryEnabled;
+                }
+
+                if (bool.TryParse(section["OpenTelemetryIncludeOperationName"], out var includeOperationName))
+                {
+                    options.OpenTelemetryIncludeOperationName = includeOperationName;
                 }
 
                 if (int.TryParse(section["SlidingWindowMaxRequests"], out var maxRequests)
